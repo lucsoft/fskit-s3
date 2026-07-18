@@ -45,8 +45,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
 
 /// Rust state carried on the ObjC controller instance. The connection registry is
@@ -148,6 +148,17 @@ define_class!(
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, menu: &NSMenu) {
             self.populate(menu);
+        }
+    }
+
+    // Clean up on quit (menu Quit, ⌘Q, or logout all route through here): unmount
+    // our volumes so the extension isn't left serving a mount that later orphans an
+    // fskitd record. The arg is an NSNotification we don't use, typed as AnyObject
+    // to avoid the extra objc2-foundation feature.
+    unsafe impl NSApplicationDelegate for Controller {
+        #[unsafe(method(applicationWillTerminate:))]
+        fn application_will_terminate(&self, _notification: &AnyObject) {
+            unmount_all_on_quit();
         }
     }
 );
@@ -333,6 +344,23 @@ fn secret_hint(err: &str) -> String {
     )
 }
 
+/// Cleanly unmount every volume this app serves, on quit. A clean (non-force)
+/// unmount removes fskitd's mount-point record, which prevents the `Code=516`
+/// "already exists" orphan a later crash/kill would otherwise leave behind. Uses
+/// non-force so a busy volume (open files) stays mounted rather than being yanked.
+/// Best-effort: failures are logged, not fatal.
+fn unmount_all_on_quit() {
+    for m in mounts::list_fskit() {
+        // Only our own filesystem type — never touch another fskit module's mounts.
+        if m.fs_type != mounts::FS_TYPE {
+            continue;
+        }
+        if let Err(e) = mounts::unmount(&m.mount_point) {
+            eprintln!("[app] unmount-on-quit {} failed: {e}", m.mount_point);
+        }
+    }
+}
+
 fn main() {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("[app] must run on the main thread");
@@ -353,6 +381,8 @@ fn main() {
 
     // The controller owns the status item + menu; keep it alive for the whole run.
     let controller = Controller::new(mtm, status_item);
+    // Also the app delegate, so `applicationWillTerminate:` can unmount on quit.
+    app.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
 
     mount_on_launch();
 
