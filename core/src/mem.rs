@@ -107,7 +107,9 @@ impl StorageBackend for InMemoryBackend {
         };
         let start = (offset as usize).min(bytes.len());
         let end = start.saturating_add(len).min(bytes.len());
-        Ok(bytes[start..end].to_vec())
+        // Checked slice: `start <= end <= len` by construction, so this is
+        // always `Some`, but `.get` keeps the code panic-free by construction.
+        Ok(bytes.get(start..end).unwrap_or(&[]).to_vec())
     }
 }
 

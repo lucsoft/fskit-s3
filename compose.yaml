@@ -1,0 +1,51 @@
+# Local S3-compatible storage for testing the backend against a real endpoint.
+#
+#   docker compose up -d          # start RustFS + create the test bucket
+#   RUSTFS_ENDPOINT=http://localhost:9000 cargo test -p fskit-s3-backend -- --ignored
+#   docker compose down           # stop (add -v to also wipe the volume)
+#
+# S3 API: http://localhost:9000   Console: http://localhost:9001
+# Credentials below are for LOCAL DEV ONLY.
+
+name: fskit-s3-dev
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: fskit-s3-rustfs
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    environment:
+      RUSTFS_ACCESS_KEY: fskit
+      RUSTFS_SECRET_KEY: fskit-secret
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+    volumes:
+      - rustfs-data:/data
+    restart: unless-stopped
+
+  # One-shot: wait for the S3 API, then create the test bucket and seed a file.
+  createbucket:
+    image: amazon/aws-cli:latest
+    depends_on:
+      - rustfs
+    environment:
+      AWS_ACCESS_KEY_ID: fskit
+      AWS_SECRET_ACCESS_KEY: fskit-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint:
+      - sh
+      - -c
+      - |
+        until aws --endpoint-url http://rustfs:9000 s3 ls >/dev/null 2>&1; do
+          echo "waiting for rustfs S3 API..."; sleep 2;
+        done
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://test-bucket 2>/dev/null || true
+        echo "hello from rustfs" | aws --endpoint-url http://rustfs:9000 s3 cp - s3://test-bucket/hello.txt
+        aws --endpoint-url http://rustfs:9000 s3 ls s3://test-bucket
+
+volumes:
+  rustfs-data:

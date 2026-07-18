@@ -4,15 +4,14 @@ Mount an S3 bucket (or any object store) as a **native macOS volume** using
 Apple's **FSKit** — a userspace filesystem framework that needs **no kernel
 extension** and **no security downgrade** (unlike macFUSE). Written in Rust.
 
-```
-Finder / Photos / any app
-        │  POSIX VFS
-        ▼
-   fskitd (FSKit)  ──Objective-C──>  ext  (objc2 FSUnaryFileSystem subclass)
-                                       │  async StorageBackend trait
-                                       ▼
-                              core::StorageBackend  ◄── backend (OpenDAL Operator)
-                                                         S3 today; WebDAV/SFTP later
+```mermaid
+flowchart TD
+    apps["Finder / Photos / any app"] -->|POSIX VFS| fskitd["fskitd (FSKit)"]
+    fskitd -->|Objective-C| ext["ext&nbsp;— objc2 FSUnaryFileSystem subclass + tokio"]
+    ext -->|"async StorageBackend trait"| core["core::StorageBackend"]
+    backend["backend — OpenDAL Operator"] -.implements.-> core
+    backend --> s3[("S3 today")]
+    backend -.->|feature flag| more[("WebDAV / SFTP / …")]
 ```
 
 ## The one idea to internalise
@@ -38,11 +37,9 @@ trait — it's an OpenDAL feature flag plus, if needed, a constructor.
 
 FSKit's ops map 1:1 onto the trait:
 
-| FSKit volume op                     | `StorageBackend` |
-| ----------------------------------- | ---------------- |
-| `enumerateDirectory`                | `list`           |
-| `lookupItemNamed` / `getAttributes` | `stat`           |
-| `readFromFile … offset length`      | `read`           |
+- `enumerateDirectory` → `list`
+- `lookupItemNamed` / `getAttributes` → `stat`
+- `readFromFile … offset length` → `read`
 
 ## Key decisions (and why)
 
@@ -85,14 +82,25 @@ prefix).
 
 ## Source map
 
-| Path | Responsibility |
-|------|----------------|
-| `core/src/lib.rs` | The `StorageBackend` trait, `Entry`/`EntryKind`, `StorageError`. Dependency-light (just `async-trait`) so it builds/tests anywhere. |
-| `core/src/path.rs` | Absolute-path normalization + object-key helpers, unit-tested. |
-| `core/src/mem.rs` | `InMemoryBackend` — a flat key→bytes map with object-store semantics; test fixture + no-credential demo mount (feature `mem`). |
-| `backend/src/lib.rs` | `OpenDalBackend`: `StorageBackend` over any OpenDAL `Operator`; `S3Config` + `::s3()` constructor. Tested against OpenDAL's in-memory service. |
-| `ext/src/lib.rs` | FSKit glue (**skeleton**): the `objc2` `FSUnaryFileSystem` subclass + tokio bridge + `StorageError`→errno mapping. Not yet in the workspace build. |
-| `bundle/` | `.appex`/host-app `Info.plist`, entitlements, and a Makefile that assembles + codesigns the module. **Templates** — reconcile against Xcode's FSKit target. |
+- **`core/src/lib.rs`** — the `StorageBackend` trait, `Entry`/`EntryKind`,
+  `StorageError`. Dependency-light (just `async-trait`) so it builds/tests
+  anywhere.
+- **`core/src/path.rs`** — absolute-path normalization + object-key helpers,
+  unit-tested.
+- **`core/src/mem.rs`** — `InMemoryBackend`, a flat key→bytes map with
+  object-store semantics; test fixture + no-credential demo mount (feature
+  `mem`).
+- **`backend/src/lib.rs`** — `OpenDalBackend`: `StorageBackend` over any OpenDAL
+  `Operator`; `S3Config` + `::s3()` constructor. Tested against OpenDAL's
+  in-memory service; an ignored `live_s3_roundtrip` test runs against the
+  `compose.yaml` RustFS.
+- **`ext/src/lib.rs`** — FSKit glue (**skeleton**): the `objc2`
+  `FSUnaryFileSystem` subclass + tokio bridge + `StorageError`→errno mapping.
+  Not yet in the workspace build.
+- **`bundle/`** — `.appex`/host-app `Info.plist`, entitlements, and a Makefile
+  that assembles + codesigns the module. **Templates** — reconcile against
+  Xcode's FSKit target.
+- **`compose.yaml`** — RustFS (S3-compatible) for local backend testing.
 
 ## Build & test
 
@@ -157,6 +165,12 @@ before investing. Current target is the general bucket mount.
 - Code, comments, commit messages in **English**.
 - Async everywhere below the FSKit boundary; keep `core` dependency-light.
 - New backend behavior gets a unit test against OpenDAL's memory service (no live
-  bucket in tests/CI).
+  bucket in tests/CI). Live-endpoint tests are `#[ignore]`d and opt-in via env.
 - Errors cross the trait as `StorageError`; the ext is the single place that maps
   them to errno/`FSKitError`.
+- **No panics in library code.** `unwrap`/`expect`/`panic!`/indexing are denied
+  by clippy outside `#[cfg(test)]` (see the `deny(...)` attrs in `core`/`backend`).
+  Prefer `?`, `match`, `.get(..).unwrap_or(..)`, and saturating/checked arithmetic.
+- **Wrap `unsafe` in checked safe functions.** All `objc2`/FFI `unsafe` (ext,
+  menubar) lives behind a small safe wrapper that validates arguments and
+  null/again-checks results; callers never write `unsafe` directly.

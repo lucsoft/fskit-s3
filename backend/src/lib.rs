@@ -11,6 +11,18 @@
 //! the unit tests drive it against OpenDAL's in-memory service and exercise the
 //! real list/stat/read semantics without a live bucket.
 
+// Library code must never panic outside tests (enforced by clippy in CI).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::unreachable
+    )
+)]
+
 use fskit_s3_core::{async_trait, path, Entry, StorageBackend, StorageError};
 use opendal::{EntryMode, ErrorKind, Operator};
 
@@ -235,5 +247,39 @@ mod tests {
             b.read("/missing", 0, 4).await,
             Err(StorageError::NotFound)
         ));
+    }
+
+    /// End-to-end against a live S3 endpoint (the `compose.yaml` RustFS). Ignored
+    /// by default so CI stays hermetic; run it with:
+    ///
+    /// ```sh
+    /// docker compose up -d
+    /// RUSTFS_ENDPOINT=http://localhost:9000 cargo test -p fskit-s3-backend -- --ignored
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires `docker compose up`; set RUSTFS_ENDPOINT and run with --ignored"]
+    async fn live_s3_roundtrip() {
+        let Ok(endpoint) = std::env::var("RUSTFS_ENDPOINT") else {
+            eprintln!("RUSTFS_ENDPOINT unset; skipping live test");
+            return;
+        };
+        let cfg = S3Config {
+            bucket: "test-bucket".into(),
+            region: "us-east-1".into(),
+            endpoint,
+            access_key_id: "fskit".into(),
+            secret_access_key: "fskit-secret".into(),
+            session_token: None,
+        };
+        let backend = OpenDalBackend::s3(&cfg).expect("build s3 backend");
+
+        // compose seeds test-bucket/hello.txt = "hello from rustfs\n".
+        let root = backend.list("/").await.expect("list root");
+        assert!(root.iter().any(|e| e.name == "hello.txt"), "root: {root:?}");
+        assert_eq!(backend.stat("/hello.txt").await.expect("stat").size, 18);
+        assert_eq!(
+            backend.read("/hello.txt", 0, 1024).await.expect("read"),
+            b"hello from rustfs\n"
+        );
     }
 }

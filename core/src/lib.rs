@@ -14,6 +14,19 @@
 //! completion — no queue thread is parked per in-flight read. `async-trait`
 //! keeps the trait dyn-compatible so the ext can hold an `Arc<dyn StorageBackend>`.
 
+// Library code must never panic: no unwrap/expect/panic/indexing outside tests.
+// Enforced by clippy in CI; tests may still unwrap freely.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::unreachable
+    )
+)]
+
 use std::error::Error;
 use std::fmt;
 use std::time::SystemTime;
