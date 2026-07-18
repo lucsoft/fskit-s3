@@ -35,9 +35,27 @@ There's no bespoke CLI: a connection is just the system `mount` tool with the
 config passed as `-o` options, so you can also do it by hand.
 
 ```sh
-mount -F -t fskit-s3 -o type=memory ~/fskit-s3/.sources/memory ~/fskit-s3/memory
-umount ~/fskit-s3/memory
+# -F: the filesystem is an FSKit module   -t fskit-s3: which module
+# (macOS `mount` is BSD-style — these flags have no --long-form spelling)
+
+# Secret inline — no setup, but insecure (visible in `ps`/`mount`):
+mount -F -t fskit-s3 \
+  -o type=s3,name=photos,bucket=my-bucket,access_key_id=AKIA…,region=us-east-1,secret=s3cr3t \
+  ~/fskit-s3/.sources/photos ~/fskit-s3/photos
+
+# …or store the secret in the Keychain (item keyed by `name`), then omit it:
+security add-generic-password -U -s dev.lucsoft.fskit-s3 -a photos -w 's3cr3t'
+mount -F -t fskit-s3 \
+  -o type=s3,name=photos,bucket=my-bucket,access_key_id=AKIA…,region=us-east-1 \
+  ~/fskit-s3/.sources/photos ~/fskit-s3/photos
+
+umount ~/fskit-s3/photos
 ```
+
+The Keychain item the **extension** reads lives in a signed, team-scoped access
+group that only the app can write — so `security add-generic-password` above
+suits your own CLI experiments; the app is what populates the shared item for a
+normal install.
 
 ## How it works
 
