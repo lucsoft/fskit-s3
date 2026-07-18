@@ -69,6 +69,9 @@ targets:
         GENERATE_INFOPLIST_FILE: "NO"
         CODE_SIGN_ENTITLEMENTS: xcode/Extension.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: xcode/Extension-Bridging-Header.h
+        # Keep the default entry (_NSExtensionMain): with it the extension starts
+        # and services probeResource. (_main / Swift's @main entry made
+        # ExtensionKit fail to start the instance — "extensionKit error 2".)
         # Link the Rust staticlib (built by the pre-build script below).
         OTHER_LDFLAGS: "-L$(BUILT_PRODUCTS_DIR) -lfskit_s3_ext"
     preBuildScripts:

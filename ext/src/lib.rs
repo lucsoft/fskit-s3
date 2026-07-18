@@ -3,9 +3,9 @@
 //! Defines the `FSUnaryFileSystem`, `FSVolume`, and `FSItem` subclasses via
 //! `objc2`, delegating every operation to a
 //! [`StorageBackend`](fskit_s3_core::StorageBackend). Built as a `staticlib` and
-//! linked into an Xcode-managed `.appex`; a tiny ObjC stub there calls
-//! [`fskit_s3_register`] from `+load` so these Rust-defined classes are
-//! registered before FSKit looks up the principal class by name.
+//! linked into an Xcode-managed `.appex`; the Swift `@main` bootstrap calls
+//! [`fskit_s3_make_filesystem`], which registers these Rust-defined classes and
+//! returns the (cached, singleton) delegate instance.
 //!
 //! Backend selection is currently the no-credential in-memory demo, so the
 //! plumbing can be validated before wiring S3 config + Keychain.
@@ -17,7 +17,7 @@ mod sys;
 mod volume;
 
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use block2::DynBlock;
 use objc2::rc::Retained;
@@ -30,8 +30,8 @@ use fskit_s3_core::StorageBackend;
 
 use item::S3Item;
 use sys::{
-    FSContainerIdentifier, FSFileName, FSProbeResult, FSResource, FSTaskOptions, FSUnaryFileSystem,
-    FSUnaryFileSystemOperations, FSVolume, FSVolumeIdentifier,
+    FSContainerIdentifier, FSContainerStatus, FSFileName, FSProbeResult, FSResource, FSTaskOptions,
+    FSUnaryFileSystem, FSUnaryFileSystemOperations, FSVolume, FSVolumeIdentifier,
 };
 use volume::S3Volume;
 
@@ -52,8 +52,11 @@ define_class!(
             reply: &DynBlock<dyn Fn(*mut FSProbeResult, *mut NSError)>,
         ) {
             // We accept any resource (there's no on-disk format to recognize).
+            // The container identity MUST be stable across probe calls (FSKit
+            // probes the same resource more than once) — a fresh UUID each time
+            // yields two containers for one resource ("unexpected container state").
             let container = {
-                let uuid = NSUUID::new();
+                let uuid = container_uuid();
                 FSContainerIdentifier::initWithUUID(FSContainerIdentifier::alloc(), &uuid)
             };
             let name = NSString::from_str("fskit-s3");
@@ -68,6 +71,9 @@ define_class!(
             _options: &FSTaskOptions,
             reply: &DynBlock<dyn Fn(*mut FSVolume, *mut NSError)>,
         ) {
+            // Transition the container from `notReady` to `ready`; without this
+            // FSKit rejects the load with "unexpected container state" (POSIX 35).
+            self.set_container_state(ContainerState::Ready);
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -92,7 +98,10 @@ define_class!(
                 let name = FSFileName::nameWithString(&NSString::from_str("fskit-s3"));
                 S3Volume::new(&vid, &name, demo_backend(), rt)
             };
-            reply.call((Retained::as_ptr(&volume) as *mut FSVolume, ptr::null_mut()));
+            // Transfer ownership (+1) to FSKit: it holds the volume for the whole
+            // mount, well past this call, so a borrowed pointer would dangle.
+            let volume_ptr = Retained::into_raw(volume) as *mut FSVolume;
+            reply.call((volume_ptr, ptr::null_mut()));
         }
 
         #[unsafe(method(unloadResource:options:replyHandler:))]
@@ -102,10 +111,39 @@ define_class!(
             _options: &FSTaskOptions,
             reply: &DynBlock<dyn Fn(*mut NSError)>,
         ) {
+            // Return the container to `notReady` so a later mount starts clean;
+            // otherwise fskitd keeps it "ready" and the next mount conflicts.
+            self.set_container_state(ContainerState::NotReady);
             reply.call((ptr::null_mut(),));
         }
     }
 );
+
+/// The FSKit container lifecycle state (mirrors `FSContainerState`).
+///
+/// FSKit *drives* the transitions by calling our delegate methods in an order it
+/// chooses, so this is a value-typed enum reported via `containerStatus` — not a
+/// consuming `self -> Container<Next>` typestate (the delegate is a fixed-class
+/// ObjC object FSKit holds, so it can't change type). Modeling the states as an
+/// enum still keeps the value type-checked and the transitions readable.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // `Active` is set by FSKit, not us — kept for completeness.
+enum ContainerState {
+    NotReady,
+    Ready,
+    Active,
+}
+
+impl FileSystem {
+    fn set_container_state(&self, state: ContainerState) {
+        let status = match state {
+            ContainerState::NotReady => FSContainerStatus::notReadyWithStatus(None),
+            ContainerState::Ready => FSContainerStatus::ready(),
+            ContainerState::Active => FSContainerStatus::active(),
+        };
+        self.setContainerStatus(&status);
+    }
+}
 
 /// The backend a mounted volume reads from. For now, a no-credential in-memory
 /// demo tree; S3/Keychain configuration replaces this.
@@ -127,15 +165,35 @@ pub extern "C" fn fskit_s3_register() {
     let _ = S3Item::class();
 }
 
-/// Construct the extension's file-system delegate.
+/// A process-stable container UUID (raw pointer as usize for `Send`/`Sync`), so
+/// every probe reports the same container identity for our synthetic container.
+static CONTAINER_UUID: OnceLock<usize> = OnceLock::new();
+
+fn container_uuid() -> Retained<NSUUID> {
+    let ptr = *CONTAINER_UUID.get_or_init(|| Retained::into_raw(NSUUID::new()) as usize);
+    // SAFETY: the cached pointer is a leaked, never-freed NSUUID.
+    unsafe { Retained::retain(ptr as *mut NSUUID) }.expect("cached NSUUID is live")
+}
+
+/// The single file-system delegate, stored as a leaked raw pointer (usize so the
+/// `OnceLock` is `Send`/`Sync`). It lives for the whole process.
+static FILESYSTEM: OnceLock<usize> = OnceLock::new();
+
+/// Construct (and cache) the extension's file-system delegate.
 ///
 /// The Swift `@main UnaryFileSystemExtension` bootstrap (the only Swift in the
 /// project) calls this and returns the result as its `fileSystem` — so the
 /// principal object is our Rust-defined class while ExtensionKit's entry point
-/// stays minimal. Returns an autoreleased (+0) instance for Swift ARC to adopt.
+/// stays minimal.
 #[no_mangle]
 pub extern "C" fn fskit_s3_make_filesystem() -> *mut FSUnaryFileSystem {
     fskit_s3_register();
-    let fs: Retained<FileSystem> = unsafe { msg_send![FileSystem::alloc(), init] };
-    Retained::autorelease_return(fs) as *mut FSUnaryFileSystem
+    // MUST be a singleton: the Swift @main's `fileSystem` property is read
+    // repeatedly by FSKit, and a fresh instance per read registers a duplicate
+    // container ("resource already exists" / "unexpected container state").
+    let ptr = *FILESYSTEM.get_or_init(|| {
+        let fs: Retained<FileSystem> = unsafe { msg_send![FileSystem::alloc(), init] };
+        Retained::into_raw(fs) as usize
+    });
+    ptr as *mut FSUnaryFileSystem
 }

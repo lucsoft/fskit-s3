@@ -276,6 +276,38 @@ extern_class!(
     pub struct FSUnaryFileSystem;
 );
 
+impl FSUnaryFileSystem {
+    extern_methods!(
+        // `containerStatus` (on FSFileSystemBase): loadResource must move the
+        // container out of `notReady` or FSKit rejects it ("unexpected container
+        // state").
+        #[unsafe(method(setContainerStatus:))]
+        pub fn setContainerStatus(&self, status: &FSContainerStatus);
+    );
+}
+
+extern_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "FSContainerStatus"]
+    pub struct FSContainerStatus;
+);
+
+impl FSContainerStatus {
+    extern_methods!(
+        /// The `+ready` class property: state `ready`, nil status.
+        #[unsafe(method(ready))]
+        pub fn ready() -> Retained<FSContainerStatus>;
+
+        /// The `+active` class property: state `active`, nil status.
+        #[unsafe(method(active))]
+        pub fn active() -> Retained<FSContainerStatus>;
+
+        /// `+notReadyWithStatus:` — pass `None` for the nil-status not-ready state.
+        #[unsafe(method(notReadyWithStatus:))]
+        pub fn notReadyWithStatus(status: Option<&NSError>) -> Retained<FSContainerStatus>;
+    );
+}
+
 // ---- protocols ---------------------------------------------------------------
 
 extern_protocol!(

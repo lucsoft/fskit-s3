@@ -95,8 +95,10 @@ define_class!(
             _options: &FSTaskOptions,
             reply: &DynBlock<dyn Fn(*mut FSItem, *mut NSError)>,
         ) {
+            // FSKit holds the root item for the mount's lifetime (until
+            // reclaimItem), so transfer ownership (+1) rather than lend it.
             let root = S3Item::new("/".to_string(), true, 0);
-            let root_fsitem: *mut FSItem = Retained::as_ptr(&root) as *mut FSItem;
+            let root_fsitem: *mut FSItem = Retained::into_raw(root) as *mut FSItem;
             reply.call((root_fsitem, ptr::null_mut()));
         }
 
@@ -150,10 +152,12 @@ define_class!(
             let child = join(dir.path(), &name_str);
             match self.ivars().rt.block_on(self.ivars().backend.stat(&child)) {
                 Ok(entry) => {
+                    // FSKit keeps the item (until reclaimItem) → transfer ownership.
+                    // The name is copied synchronously, so lending it is fine.
                     let item = S3Item::new(child, entry.is_dir(), entry.size);
                     let fname = FSFileName::nameWithString(&NSString::from_str(&name_str));
                     reply.call((
-                        Retained::as_ptr(&item) as *mut FSItem,
+                        Retained::into_raw(item) as *mut FSItem,
                         Retained::as_ptr(&fname) as *mut FSFileName,
                         ptr::null_mut(),
                     ));
@@ -198,6 +202,7 @@ define_class!(
                 }
             };
             // Resume from `cookie` (the next-cookie we handed out last time).
+            let parent_id = item_id_for(dir.path());
             for (i, entry) in entries.iter().enumerate().skip(cookie as usize) {
                 let fname = FSFileName::nameWithString(&NSString::from_str(&entry.name));
                 let item_type = if entry.is_dir() {
@@ -207,7 +212,19 @@ define_class!(
                 };
                 let id = item_id_for(&join(dir.path(), &entry.name));
                 let next_cookie = (i + 1) as FSDirectoryCookie;
-                if !packer.packEntry(&fname, item_type, id, next_cookie, None) {
+                // Pack the attributes inline — FSKit drops entries that lack them.
+                let attrs = FSItemAttributes::new();
+                attrs.setType(item_type);
+                attrs.setMode(if entry.is_dir() { 0o40755 } else { 0o100644 });
+                attrs.setLinkCount(1);
+                attrs.setUid(0);
+                attrs.setGid(0);
+                attrs.setSize(entry.size);
+                attrs.setAllocSize(entry.size);
+                attrs.setFileID(id);
+                attrs.setParentID(parent_id);
+                let packed = packer.packEntry(&fname, item_type, id, next_cookie, Some(&attrs));
+                if !packed {
                     break; // buffer full; FSKit will call again with this cookie
                 }
             }
