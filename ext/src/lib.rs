@@ -154,11 +154,22 @@ impl FileSystem {
 }
 
 /// The no-credential in-memory demo tree (served for the `memory` connection and
-/// when no connection is named).
-fn demo_backend() -> Arc<dyn StorageBackend> {
+/// when no connection is named). `debug` is the raw `taskOptions` we saw — exposed
+/// as `_fskit_debug.txt` so a mount that unexpectedly serves the demo reveals what
+/// FSKit actually delivered (TEMP diagnostic).
+fn demo_backend(debug: &[String]) -> Arc<dyn StorageBackend> {
     let mut b = InMemoryBackend::new();
     b.insert("readme.txt", b"mounted by fskit-s3\n".to_vec())
-        .insert("photos/cover.png", vec![0u8; 32]);
+        .insert("photos/cover.png", vec![0u8; 32])
+        .insert(
+            "_fskit_debug.txt",
+            format!(
+                "taskOptions ({} tokens):\n{}\n",
+                debug.len(),
+                debug.join("\n")
+            )
+            .into_bytes(),
+        );
     Arc::new(b)
 }
 
@@ -173,10 +184,11 @@ const KEYCHAIN_ACCESS_GROUP: &str = "H8563U643B.dev.lucsoft.fskit-s3";
 /// mount fails) when a named S3 connection is missing required config or a secret,
 /// rather than silently serving the demo.
 fn backend_for(options: &FSTaskOptions) -> Result<Arc<dyn StorageBackend>, String> {
-    let opts = parse_options(options);
+    let raw = raw_task_options(options);
+    let opts = parse_options(&raw);
     let name = opts.get("name").map(String::as_str).unwrap_or("");
     if name.is_empty() || name == "memory" {
-        return Ok(demo_backend());
+        return Ok(demo_backend(&raw));
     }
 
     let bucket = opts.get("bucket").cloned().unwrap_or_default();
@@ -202,14 +214,20 @@ fn backend_for(options: &FSTaskOptions) -> Result<Arc<dyn StorageBackend>, Strin
     Ok(Arc::new(backend))
 }
 
-/// Parse `FSTaskOptions.taskOptions` (`key=value` tokens) into a map.
-fn parse_options(options: &FSTaskOptions) -> HashMap<String, String> {
+/// The raw `FSTaskOptions.taskOptions` tokens (the argv-equivalent array).
+fn raw_task_options(options: &FSTaskOptions) -> Vec<String> {
     let tokens = options.taskOptions();
+    (0..tokens.count())
+        .map(|i| tokens.objectAtIndex(i).to_string())
+        .collect()
+}
+
+/// Parse `key=value` pairs out of the raw task-option tokens. Each token may be a
+/// single `key=value`, a bare flag like `-o`, or the whole comma-joined `-o`
+/// string — so split on commas first and keep only the `key=value` parts.
+fn parse_options(raw: &[String]) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    for i in 0..tokens.count() {
-        // A token may be a single `key=value`, or the whole comma-joined `-o`
-        // string — split on commas first so both shapes work.
-        let token = tokens.objectAtIndex(i).to_string();
+    for token in raw {
         for part in token.split(',') {
             if let Some((key, value)) = part.split_once('=') {
                 map.insert(key.trim().to_string(), value.to_string());
