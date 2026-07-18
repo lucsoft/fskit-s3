@@ -16,6 +16,7 @@
 #![allow(non_snake_case)]
 
 mod item;
+mod oslog;
 mod sys;
 mod volume;
 
@@ -258,22 +259,16 @@ fn posix_error(errno: i32) -> Retained<NSError> {
     }
 }
 
-extern "C" {
-    fn NSLog(format: *const NSString, ...);
-}
-
 /// Log a line to the unified log (visible via `log stream` / the app's dev-mode
 /// tail), prefixed `[fskit-s3]`. The extension is headless, so this is how
 /// mount-time decisions and failures surface for debugging.
 ///
-/// The message is embedded in the format string itself (with `%` escaped), not
-/// passed as a `%@` argument: os_log redacts interpolated arguments as `<private>`,
-/// but the format literal is always public — so the taskOptions/reason stay visible.
+/// Routed through [`oslog::log_public`] so it's emitted as PUBLIC text: `NSLog`
+/// stores its message as a redacted argument (shows as `<private>` unless the
+/// machine has private-data logging on), which hid these lines exactly when they
+/// were needed.
 fn log_line(message: &str) {
-    let text = NSString::from_str(&format!("[fskit-s3] {}", message.replace('%', "%%")));
-    // SAFETY: NSLog is variadic; we pass only the format string (no varargs), and it
-    // contains no live format specifiers (every `%` is escaped to `%%`).
-    unsafe { NSLog(Retained::as_ptr(&text)) };
+    oslog::log_public(&format!("[fskit-s3] {message}"));
 }
 
 /// Force-register the Rust-defined FSKit classes with the Objective-C runtime.
