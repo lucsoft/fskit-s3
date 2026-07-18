@@ -19,6 +19,10 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
+    <!-- Overwritten at build time with the git SHA (scripts/stamp-git-sha.sh);
+         the host reads it to check host/extension build match. -->
+    <key>FSKitS3GitSHA</key>
+    <string>unknown</string>
     <key>EXAppExtensionAttributes</key>
     <dict>
         <key>EXExtensionPointIdentifier</key>

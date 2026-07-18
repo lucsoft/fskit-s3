@@ -137,10 +137,28 @@ prefix).
   `FSClient.installedExtensions` for our module's installed/enabled state and
   self-refreshes, so enabling it in Settings flips it to ✓ (macOS won't let an app
   toggle a file-system extension itself, so it deep-links to the Settings pane).
-  You can close it once ready — the extension runs in its own `fskitd`-launched
-  process, independent of both apps.
+  It also flags a **build mismatch**: it compares its own git SHA (`FSKitS3GitSHA`
+  in its Info.plist) against that of the extension FSKit will actually launch
+  (`FSModuleIdentity.url` → that bundle's `FSKitS3GitSHA`). Same SHA ⇒ green; a
+  different SHA ⇒ amber "fskitd will launch a DIFFERENT build" — the reliable,
+  content-based staleness signal (mtimes lie; git rewrites them on checkout). A
+  `-dirty` SHA is shown yellow since two dirty builds can share a SHA. You can
+  close it once ready — the extension runs in its own `fskitd`-launched process.
 - **`scripts/build-ext-staticlib.sh`** — Xcode Run Script phase: builds the
   `ext` staticlib for the target arch(es) and drops it in `$BUILT_PRODUCTS_DIR`.
+  It exports `FSKIT_S3_GIT_SHA` (from `scripts/git-sha.sh`) so `ext/build.rs`
+  compiles the SHA into the staticlib — the extension logs it at `activate`
+  (`[fskit-s3] activate: build <sha>`), the one signal that reveals daemon-cache
+  staleness (right bundle on disk, stale *loaded* process).
+- **`scripts/git-sha.sh`** — prints `git describe --always --dirty`; the single
+  source of the build SHA. **`scripts/stamp-git-sha.sh`** — a Run Script phase on
+  *both* targets that writes that SHA into the built `Info.plist` (`FSKitS3GitSHA`)
+  before code-signing, so the host can compare host vs extension.
+- **`ext/src/oslog.rs`** — public logging via `os_log` (`%{public}s`). `NSLog`
+  output is stored as a redacted argument (shows as `<private>` in `log stream`
+  unless private-data mode is on), which hid our diagnostics exactly when needed;
+  `log_line` routes through here instead. Filter with
+  `log stream --predicate 'subsystem == "dev.lucsoft.fskit-s3"'`.
 - **`compose.yaml`** — RustFS (S3-compatible) for local backend testing.
 
 ## Build & test

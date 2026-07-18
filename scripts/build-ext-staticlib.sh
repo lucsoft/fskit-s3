@@ -11,6 +11,10 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
+# Compile the git SHA into the staticlib (ext/build.rs reads this), so the SHA
+# the extension logs at activate matches the one stamped into its Info.plist.
+export FSKIT_S3_GIT_SHA="$("$(dirname "$0")/git-sha.sh")"
+
 CONFIG="${CONFIGURATION:-Release}"
 if [ "$CONFIG" = "Debug" ]; then PROFILE_DIR="debug"; PROFILE_FLAG=""; else PROFILE_DIR="release"; PROFILE_FLAG="--release"; fi
 

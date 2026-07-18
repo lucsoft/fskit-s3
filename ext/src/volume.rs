@@ -100,6 +100,11 @@ define_class!(
             options: &FSTaskOptions,
             reply: &DynBlock<dyn Fn(*mut FSItem, *mut NSError)>,
         ) {
+            // Log which build is actually serving this mount. This is the only
+            // signal that reveals daemon-cache staleness (right bundle on disk,
+            // stale loaded process): the host compares the on-disk Info.plist SHA,
+            // but only the running process can report its own compiled-in SHA.
+            crate::log_line(&format!("activate: build {}", env!("FSKIT_S3_GIT_SHA")));
             // The mount's `-o` config arrives HERE (not at loadResource), so this
             // is where the backend is chosen. A misconfigured connection fails the
             // activation (EINVAL) rather than mounting an unusable volume.

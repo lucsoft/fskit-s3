@@ -43,17 +43,24 @@ private enum Health: Equatable {
     case error(String)
 }
 
-/// Identity of an extension bundle on disk: its build version and location.
+/// Identity of an extension bundle on disk: its build SHA, version, and location.
 private struct BuildInfo: Equatable {
+    let sha: String      // FSKitS3GitSHA (git describe --always --dirty)
     let version: String  // CFBundleVersion
     let path: String     // resolved bundle path
+
+    /// A `-dirty` build was made from an uncommitted tree — two such builds can
+    /// share a SHA yet differ, so a match on a dirty SHA isn't conclusive.
+    var isDirty: Bool { sha.hasSuffix("-dirty") }
+    /// The SHA is a usable identity (present and not the `unknown` placeholder).
+    var hasSHA: Bool { !sha.isEmpty && sha != "unknown" }
 }
 
 /// How the registered (will-launch) extension compares to the one this app ships.
 private enum Freshness: Equatable {
     case unknown
-    case fresh(BuildInfo)                                    // registered == embedded
-    case stale(registered: BuildInfo, embedded: BuildInfo?)  // a different build will run
+    case match(BuildInfo)                                    // same git SHA as this host
+    case mismatch(registered: BuildInfo, host: BuildInfo?)   // a different build will run
 }
 
 private struct HealthView: View {
@@ -99,16 +106,20 @@ private struct HealthView: View {
         switch freshness {
         case .unknown:
             EmptyView()
-        case .fresh(let info):
+        case .match(let info) where info.isDirty:
+            status(.yellow, "checkmark.seal",
+                   "Registered extension matches this app (build \(info.sha)) — dirty build, so equal SHAs aren't a guarantee.")
+        case .match(let info):
             status(.green, "checkmark.seal.fill",
-                   "Registered build matches this app (v\(info.version)).")
-        case .stale(let registered, let embedded):
-            let mine = embedded.map { "this app carries v\($0.version)" } ?? "this app has no embedded extension"
+                   "Registered extension matches this app (build \(info.sha)).")
+        case .mismatch(let registered, let host):
+            let mine = host?.sha ?? "none"
             status(.orange, "exclamationmark.triangle.fill",
                    """
-                   Stale: fskitd will launch a DIFFERENT build than this app.
-                   Registered: v\(registered.version) — \(registered.path)
-                   (\(mine).) Re-run this app, or reset with: sudo killall fskitd
+                   Build mismatch — fskitd will launch a DIFFERENT build than this app.
+                   Registered extension: build \(registered.sha)
+                   This app: build \(mine)
+                   Re-run this app to re-register; if it persists: sudo killall fskitd
                    """)
         }
     }
@@ -150,36 +161,29 @@ private struct HealthView: View {
         }
     }
 
-    /// Compare the extension FSKit will launch (`registeredURL`) with the .appex
-    /// embedded in this running host app.
+    /// Compare the git SHA of the extension FSKit will launch (`registeredURL`)
+    /// against this host app's own SHA. The host and its embedded extension are
+    /// built together, so their SHAs match by construction — a divergence means a
+    /// different extension build (another branch, another copy, or a stale
+    /// registration) is what will actually run.
     private func compareBuilds(registeredURL: URL) -> Freshness {
-        let embedded = embeddedExtensionInfo()
-        guard let registered = buildInfo(at: registeredURL) else {
-            // Can't read the registered bundle — treat unknown rather than alarm.
-            return .unknown
-        }
-        if let embedded, embedded == registered {
-            return .fresh(registered)
-        }
-        return .stale(registered: registered, embedded: embedded)
+        guard let registered = buildInfo(at: registeredURL) else { return .unknown }
+        // Need a real SHA on both sides to compare identities; otherwise stay
+        // quiet rather than raise a false alarm (e.g. a pre-SHA build).
+        guard let host = buildInfo(at: Bundle.main.bundleURL),
+              registered.hasSHA, host.hasSHA
+        else { return .unknown }
+        return registered.sha == host.sha ? .match(registered)
+                                          : .mismatch(registered: registered, host: host)
     }
 
-    /// The extension bundle shipped inside this host app (`Contents/Extensions`).
-    private func embeddedExtensionInfo() -> BuildInfo? {
-        let extDir = Bundle.main.bundleURL.appendingPathComponent("Contents/Extensions")
-        let entries = (try? FileManager.default.contentsOfDirectory(
-            at: extDir, includingPropertiesForKeys: nil)) ?? []
-        let match = entries.first { Bundle(url: $0)?.bundleIdentifier == extensionBundleID }
-        return match.flatMap(buildInfo(at:))
-    }
-
-    /// Read `{version, resolved-path}` from a bundle on disk.
+    /// Read `{sha, version, resolved-path}` from a bundle on disk.
     private func buildInfo(at url: URL) -> BuildInfo? {
-        guard let bundle = Bundle(url: url),
-              let version = bundle.infoDictionary?["CFBundleVersion"] as? String
-        else { return nil }
+        guard let info = Bundle(url: url)?.infoDictionary else { return nil }
+        let sha = info["FSKitS3GitSHA"] as? String ?? "unknown"
+        let version = info["CFBundleVersion"] as? String ?? "?"
         let path = url.resolvingSymlinksInPath().standardizedFileURL.path
-        return BuildInfo(version: version, path: path)
+        return BuildInfo(sha: sha, version: version, path: path)
     }
 
     private func openExtensionSettings() {

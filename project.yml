@@ -56,6 +56,12 @@ targets:
         embed: true
       # The host window's health check queries FSClient (installed/enabled state).
       - sdk: FSKit.framework
+    postBuildScripts:
+      # Stamp this app's git SHA into its Info.plist (runs before code-signing),
+      # so the health window can compare it against the extension's SHA.
+      - name: "Stamp git SHA (host)"
+        script: '"$PROJECT_DIR/scripts/stamp-git-sha.sh"'
+        basedOnDependencyAnalysis: false
 
   # -- FSKit extension: Swift @main bootstrap + the Rust staticlib. --
   fskit-s3-ext:
@@ -79,6 +85,12 @@ targets:
     preBuildScripts:
       - name: "Build Rust staticlib (fskit-s3-ext)"
         script: '"$PROJECT_DIR/scripts/build-ext-staticlib.sh"'
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      # Stamp the extension's git SHA into its Info.plist (before code-signing),
+      # matching the SHA compiled into the staticlib and logged at activate.
+      - name: "Stamp git SHA (ext)"
+        script: '"$PROJECT_DIR/scripts/stamp-git-sha.sh"'
         basedOnDependencyAnalysis: false
     dependencies:
       - sdk: FSKit.framework
