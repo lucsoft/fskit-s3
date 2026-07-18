@@ -6,6 +6,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Xcode "Run Script" phases run with a minimal PATH that omits rustup's
+# ~/.cargo/bin and Homebrew, so `cargo`/`rustup` aren't found. Add them.
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
 CONFIG="${CONFIGURATION:-Release}"
 if [ "$CONFIG" = "Debug" ]; then PROFILE_DIR="debug"; PROFILE_FLAG=""; else PROFILE_DIR="release"; PROFILE_FLAG="--release"; fi
 
