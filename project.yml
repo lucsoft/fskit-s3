@@ -22,6 +22,10 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
+    # Xcode 16's debug-dylib splits the binary into a stub launcher + a
+    # .debug.dylib. The system launches app extensions directly, and the stub
+    # indirection breaks that ("Unable to invoke task", no logs/crash). Off.
+    ENABLE_DEBUG_DYLIB: "NO"
 
 # You build/run the HOST app (it registers the embedded extension); an extension
 # can't run on its own. Make a scheme for it so it shows in the selector.
