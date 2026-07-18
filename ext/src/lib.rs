@@ -149,6 +149,22 @@ impl FileSystem {
     }
 }
 
+/// Return the loaded container to `notReady`, from anywhere in the extension.
+///
+/// `loadResource` marks the container `ready` before the mount's `-o` options are
+/// available, so the backend is only chosen later in the volume's `activate`. When
+/// that fails (bad config / no secret), signal the container back to `notReady`
+/// so fskitd can tear the loaded resource down instead of leaving the instance
+/// stuck (which makes the next mount fail at probe with "Resource busy").
+pub fn signal_container_not_ready() {
+    if let Some(&ptr) = FILESYSTEM.get() {
+        // SAFETY: the cached pointer is our leaked, process-lifetime FileSystem
+        // singleton (set in `fskit_s3_make_filesystem`).
+        let fs = unsafe { &*(ptr as *const FileSystem) };
+        fs.set_container_state(ContainerState::NotReady);
+    }
+}
+
 /// The no-credential in-memory demo tree (served only for the explicit `memory`
 /// connection).
 fn demo_backend() -> Arc<dyn StorageBackend> {
