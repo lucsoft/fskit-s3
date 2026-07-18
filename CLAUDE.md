@@ -125,7 +125,13 @@ prefix).
     removes it after a confirmation) + the secret-prompt window (native `NSWindow`).
   - `main.rs` + `appkit.rs` — the status-bar UI (`objc2`): *New Connection…* plus a
     submenu per connection (a green/grey status dot + *Mount*/*Unmount* toggle +
-    *Update…*). All AppKit FFI stays in `appkit.rs`.
+    *Update…*). All AppKit FFI stays in `appkit.rs`. A failed *Mount*/*Unmount*
+    raises an `NSAlert` (`appkit::show_error`/`confirm`) rather than only logging.
+    `classify_mount_error` maps `mount`'s terse text to a specific fix: a stale
+    fskitd record (`Code=516`/"already exists") → *run `sudo killall fskitd`* (the
+    daemon is root-owned, so the app can't clear it); *Resource busy* → unmount
+    first; EINVAL on S3 → offer *Enter Secret…* (the `-o secret` prompt, the usual
+    fix when the extension can't read the Keychain on an unsigned build).
 
   `connection`/`keychain`/`s3check`/`mounts` are pure Rust + unit-tested.
 - **`xcode/`** — the non-Rust packaging: the Swift `@main`

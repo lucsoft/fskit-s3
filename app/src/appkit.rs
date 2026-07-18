@@ -388,6 +388,15 @@ pub fn set_button_destructive(button: &NSButton) {
     button.setBezelColor(Some(&red));
 }
 
+/// Show a modal error alert with a single OK button.
+pub fn show_error(mtm: MainThreadMarker, message: &str, info: &str) {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(message));
+    alert.setInformativeText(&NSString::from_str(info));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    alert.runModal();
+}
+
 /// Show a modal "are you sure?" alert with a destructive default button. Returns
 /// `true` only if the user confirms (clicks `confirm_title`).
 pub fn confirm(mtm: MainThreadMarker, message: &str, info: &str, confirm_title: &str) -> bool {

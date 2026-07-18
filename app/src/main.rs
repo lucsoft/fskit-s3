@@ -84,6 +84,19 @@ define_class!(
             }
             if let Err(e) = mounts::mount(conn, &conn.default_mount_point(), None) {
                 eprintln!("[app] mount {name} failed: {e}");
+                if let Some(mtm) = MainThreadMarker::new() {
+                    let title = format!("Couldn't mount “{name}”");
+                    match classify_mount_error(&e) {
+                        // Missing/unreadable secret on an S3 mount: offer the prompt
+                        // (which mounts with `-o secret`) — the usual dev-build fix.
+                        MountFailure::Secret if conn.is_s3() => {
+                            if appkit::confirm(mtm, &title, &secret_hint(&e), "Enter Secret…") {
+                                addwindow::open_password(mtm, conn.clone());
+                            }
+                        }
+                        other => appkit::show_error(mtm, &title, &other.describe(&e)),
+                    }
+                }
             }
         }
 
@@ -113,6 +126,9 @@ define_class!(
             let Some(path) = appkit::represented_string(item) else { return };
             if let Err(e) = mounts::unmount(&path) {
                 eprintln!("[app] unmount {path} failed: {e}");
+                if let Some(mtm) = MainThreadMarker::new() {
+                    appkit::show_error(mtm, "Couldn’t unmount", &e);
+                }
             }
         }
 
@@ -256,6 +272,65 @@ fn mount_on_launch() {
             eprintln!("[app] auto-mount {} failed: {e}", conn.name);
         }
     }
+}
+
+/// A classified mount failure, so the error dialog can give a specific fix rather
+/// than echo `mount`'s terse text.
+enum MountFailure {
+    /// fskitd still holds a mount-point record from a prior mount that didn't
+    /// unmount cleanly (`Failed to store the mount point … Code=516`). Only a
+    /// daemon restart clears it, and fskitd is root-owned — so admin is required.
+    StaleRecord,
+    /// The mount point is already in use (`Resource busy`).
+    Busy,
+    /// The extension rejected the mount (EINVAL) — most often a missing/unreadable
+    /// S3 secret.
+    Secret,
+    /// Anything else — show the raw error.
+    Other,
+}
+
+/// Classify a `mount` failure from its stderr text.
+fn classify_mount_error(err: &str) -> MountFailure {
+    if err.contains("already exists") || err.contains("Code=516") {
+        MountFailure::StaleRecord
+    } else if err.contains("Resource busy") {
+        MountFailure::Busy
+    } else if err.contains("Invalid argument") || err.contains("Code=22") {
+        MountFailure::Secret
+    } else {
+        MountFailure::Other
+    }
+}
+
+impl MountFailure {
+    /// The informative text for the error dialog.
+    fn describe(&self, err: &str) -> String {
+        match self {
+            MountFailure::StaleRecord => format!(
+                "A leftover FSKit mount record is blocking this mount point — a \
+                 previous mount didn't unmount cleanly. Clearing it needs a daemon \
+                 restart (fskitd runs as root). In Terminal, run:\n\n    \
+                 sudo killall fskitd\n\nthen try mounting again.\n\nDetails: {err}"
+            ),
+            MountFailure::Busy => format!(
+                "Something is already mounted at this location. Unmount it first, \
+                 then try again.\n\nDetails: {err}"
+            ),
+            MountFailure::Secret => secret_hint(err),
+            MountFailure::Other => format!("Details: {err}"),
+        }
+    }
+}
+
+/// The dialog text for a likely secret/config rejection (EINVAL).
+fn secret_hint(err: &str) -> String {
+    format!(
+        "The extension rejected the mount. If the secret is saved to the Keychain, \
+         note that an unsigned/development build can't read the shared Keychain from \
+         the extension — choose “Enter Secret…” to provide it for this mount. \
+         Otherwise, check the connection's config.\n\nDetails: {err}"
+    )
 }
 
 fn main() {
