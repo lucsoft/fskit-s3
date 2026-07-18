@@ -118,11 +118,16 @@ pub fn unmount(mount_point: &str) -> Result<(), String> {
         .arg(mount_point)
         .output()
         .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(stderr_or_status(&out))
+    if !out.status.success() {
+        return Err(stderr_or_status(&out));
     }
+    // The volume is detached now, so the mount point is a plain empty directory the
+    // app created at mount time. Remove it so an unmounted connection leaves no
+    // stray folder behind. Best-effort and empty-only (`remove_dir`, not
+    // `remove_dir_all`): if anything is there, or it's still busy, leave it be — a
+    // later mount recreates it anyway.
+    let _ = fs::remove_dir(mount_point);
+    Ok(())
 }
 
 /// The stderr of a failed command, trimmed; falls back to the exit status when
