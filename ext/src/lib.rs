@@ -22,7 +22,7 @@ use std::sync::Arc;
 use block2::DynBlock;
 use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
-use objc2::{define_class, AllocAnyThread, ClassType};
+use objc2::{define_class, msg_send, AllocAnyThread, ClassType};
 use objc2_foundation::{NSError, NSString, NSUUID};
 
 use fskit_s3_core::mem::InMemoryBackend;
@@ -125,4 +125,17 @@ pub extern "C" fn fskit_s3_register() {
     let _ = FileSystem::class();
     let _ = S3Volume::class();
     let _ = S3Item::class();
+}
+
+/// Construct the extension's file-system delegate.
+///
+/// The Swift `@main UnaryFileSystemExtension` bootstrap (the only Swift in the
+/// project) calls this and returns the result as its `fileSystem` — so the
+/// principal object is our Rust-defined class while ExtensionKit's entry point
+/// stays minimal. Returns an autoreleased (+0) instance for Swift ARC to adopt.
+#[no_mangle]
+pub extern "C" fn fskit_s3_make_filesystem() -> *mut FSUnaryFileSystem {
+    fskit_s3_register();
+    let fs: Retained<FileSystem> = unsafe { msg_send![FileSystem::alloc(), init] };
+    Retained::autorelease_return(fs) as *mut FSUnaryFileSystem
 }
