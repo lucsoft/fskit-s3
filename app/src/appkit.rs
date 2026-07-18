@@ -306,9 +306,12 @@ pub fn set_default_button(button: &NSButton) {
     button.setKeyEquivalent(&NSString::from_str("\r"));
 }
 
-/// Give a button a red bezel to mark it as destructive (the Delete action).
+/// Mark a button as destructive (the Delete action): the standard macOS destructive
+/// role plus a *translucent* red bezel — a subtle tint, not a solid red slab.
 pub fn set_button_destructive(button: &NSButton) {
-    button.setBezelColor(Some(&NSColor::systemRedColor()));
+    button.setHasDestructiveAction(true);
+    let red = NSColor::systemRedColor().colorWithAlphaComponent(0.5);
+    button.setBezelColor(Some(&red));
 }
 
 /// Show a modal "are you sure?" alert with a destructive default button. Returns
