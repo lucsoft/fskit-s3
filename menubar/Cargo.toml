@@ -12,6 +12,10 @@ name = "fskit-s3-menubar"
 path = "src/main.rs"
 
 [dependencies]
+# Connection + mount management (pure Rust, fully tested). This app only adds the
+# AppKit UI on top; mounting itself is the system `mount` tool with the
+# connection's `-o` options, so no bespoke CLI binary is needed.
+fskit-s3-manage = { workspace = true }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 # Default features enable the AppKit classes we use (NSApplication, NSStatusItem,

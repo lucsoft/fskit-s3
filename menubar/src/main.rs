@@ -1,12 +1,13 @@
 //! `fskit-s3-menubar` — a macOS status-bar app to manage fskit-s3 mounts.
 //!
-//! Shows a menu-bar item whose dropdown lists the currently mounted fskit-s3
-//! volumes, each with an *Unmount* action, plus *Refresh* and *Quit*. Mount
-//! enumeration and unmounting are pure Rust in [`mounts`]; the AppKit UI is
-//! driven via `objc2`, with all FFI confined to [`appkit`].
+//! Shows a menu-bar item whose dropdown lists the configured connections (each
+//! with a *Mount* action) and the currently mounted fskit-s3 volumes (each with
+//! an *Unmount* action), plus *Refresh* and *Quit*. All connection/mount logic is
+//! the shared [`fskit_s3_manage`] crate — the same one the `fskit-s3` CLI uses —
+//! so this file is purely the AppKit UI, driven via `objc2` with all FFI confined
+//! to [`appkit`].
 //!
-//! Runs as an `Accessory` app (no Dock tile). It manages *existing* mounts;
-//! creating a mount arrives once the FSKit extension is installable.
+//! Runs as an `Accessory` app (no Dock tile).
 
 // The app must not panic in normal operation.
 #![cfg_attr(
@@ -15,8 +16,8 @@
 )]
 
 mod appkit;
-mod mounts;
 
+use fskit_s3_manage::{self as manage, Registry};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -28,6 +29,8 @@ use objc2_app_kit::{
 /// Rust state carried on the ObjC controller instance.
 struct Ivars {
     status_item: Retained<NSStatusItem>,
+    /// The configured connections (in-memory for now; see `fskit_s3_manage`).
+    registry: Registry,
 }
 
 define_class!(
@@ -39,11 +42,26 @@ define_class!(
     struct Controller;
 
     impl Controller {
+        #[unsafe(method(mount:))]
+        fn mount_action(&self, sender: Option<&NSMenuItem>) {
+            let Some(item) = sender else { return };
+            let Some(name) = appkit::represented_string(item) else {
+                return;
+            };
+            let Some(conn) = self.ivars().registry.get(&name) else {
+                return;
+            };
+            if let Err(e) = manage::mount(conn, &conn.default_mount_point()) {
+                eprintln!("[menubar] mount {name} failed: {e}");
+            }
+            self.rebuild();
+        }
+
         #[unsafe(method(unmount:))]
         fn unmount_action(&self, sender: Option<&NSMenuItem>) {
             let Some(item) = sender else { return };
             let Some(path) = appkit::represented_string(item) else { return };
-            if let Err(e) = mounts::unmount(&path) {
+            if let Err(e) = manage::unmount(&path) {
                 eprintln!("[menubar] unmount {path} failed: {e}");
             }
             self.rebuild();
@@ -67,12 +85,15 @@ define_class!(
 
 impl Controller {
     fn new(mtm: MainThreadMarker, status_item: Retained<NSStatusItem>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(Ivars { status_item });
+        let this = Self::alloc(mtm).set_ivars(Ivars {
+            status_item,
+            registry: Registry::with_defaults(),
+        });
         // SAFETY: standard NSObject designated initializer on a fresh allocation.
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Rebuild the dropdown from the current mount list.
+    /// Rebuild the dropdown from the current connections + mount list.
     fn rebuild(&self) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
@@ -80,26 +101,33 @@ impl Controller {
         let target: &AnyObject = self;
         let menu = appkit::menu(mtm);
 
+        // Connections — each mountable.
         menu.addItem(&appkit::menu_item(
             mtm,
-            "fskit-s3 mounts",
+            "Connections",
             None,
             None,
             None,
             false,
         ));
-        menu.addItem(&appkit::separator(mtm));
-
-        let mounts = mounts::list_fskit();
-        if mounts.is_empty() {
+        for c in self.ivars().registry.list() {
             menu.addItem(&appkit::menu_item(
                 mtm,
-                "No mounts",
-                None,
-                None,
-                None,
-                false,
+                &format!("Mount  {}  ({})", c.name, c.kind.label()),
+                Some(sel!(mount:)),
+                Some(target),
+                Some(&c.name),
+                true,
             ));
+        }
+
+        menu.addItem(&appkit::separator(mtm));
+
+        // Active mounts — each unmountable.
+        menu.addItem(&appkit::menu_item(mtm, "Mounted", None, None, None, false));
+        let mounts = manage::list_fskit();
+        if mounts.is_empty() {
+            menu.addItem(&appkit::menu_item(mtm, "None", None, None, None, false));
         } else {
             for m in &mounts {
                 menu.addItem(&appkit::menu_item(

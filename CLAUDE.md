@@ -101,9 +101,21 @@ prefix).
   against a `StorageBackend` on a tokio runtime; mutating ops reply `EROFS`.
   `lib.rs`: `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
   `fskit_s3_make_filesystem` entry point.
-- **`menubar/src/`** — `fskit-s3-menubar`, a macOS status-bar app (`objc2` +
-  AppKit) that lists and unmounts fskit-s3 volumes. `mounts.rs` is pure/tested;
-  `appkit.rs` is the *only* module that writes `unsafe`, behind checked helpers.
+- **`manage/src/`** — `fskit-s3-manage`, the **host-side management logic** behind
+  the app: `connection.rs` holds the `Connection`/`ConnectionKind`/`Registry`
+  model (a *connection* is a mountable endpoint; today only the in-memory `Demo`,
+  held in an in-memory registry seeded from `Registry::with_defaults`), and
+  `mount.rs` is the mount table + `mount` (`mount -F -t fskit-s3 [-o …] …`) /
+  `unmount` actions. A connection's config rides as `-o` options
+  (`Connection::mount_options`), so there is **no bespoke CLI** — the system
+  `mount`/`umount` are that. Pure Rust (shells out to `mount`/`diskutil`), no
+  `objc2` — fully unit-tested, panic-denied.
+- **`menubar/src/`** — `fskit-s3-menubar`, the macOS app (a status-bar app,
+  `objc2` + AppKit). The dropdown lists connections (each *Mount*) and active
+  mounts (each *Unmount*), all via `fskit-s3-manage`; `appkit.rs` is the *only*
+  module that writes `unsafe`, behind checked helpers. A connection-config UI
+  (add/edit S3 endpoints) arrives with real connections — nothing to configure
+  while the only connection is the built-in demo.
 - **`xcode/`** — the non-Rust packaging: the ~8-line Swift `@main`
   `UnaryFileSystemExtension` bootstrap (returns the Rust class via
   `fskit_s3_make_filesystem`), bridging header, entitlements, and a build recipe.
@@ -124,6 +136,23 @@ cargo fmt --all
 only becomes a *loadable* module once linked into the Xcode ExtensionKit target
 and codesigned — see `xcode/README.md`. The `com.apple.developer.fskit.fsmodule`
 entitlement generally needs a paid Apple Developer Program membership.
+
+### Managing mounts (the app)
+
+There is **no bespoke CLI**: a connection is realised by the system `mount` tool
+with the connection's config as `-o` options, so the two ways to mount are the
+app and a plain `mount` command. Once the extension is installed and enabled:
+
+```bash
+cargo run -p fskit-s3-menubar          # the app: ☁ menu-bar item, Mount/Unmount per connection
+# …or the equivalent by hand (what the app runs under the hood):
+mount -F -t fskit-s3 ~/fskit-s3/.sources/demo ~/fskit-s3/demo
+umount ~/fskit-s3/demo
+```
+
+Connections are **in-memory** for now (seeded from `Registry::with_defaults`);
+persisting a user-defined set (config file + Keychain secrets) is the same
+milestone that wires the real S3 backend and grows `mount_options` past empty.
 
 ### Adding a storage backend (e.g. WebDAV)
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "backend", "menubar", "ext"]
+members = ["core", "backend", "manage", "menubar", "ext"]
 
 [workspace.package]
 edition = "2021"
@@ -10,3 +10,4 @@ repository = "https://github.com/lucsoft/fskit-s3"
 [workspace.dependencies]
 fskit-s3-core = { path = "core" }
 fskit-s3-backend = { path = "backend" }
+fskit-s3-manage = { path = "manage" }

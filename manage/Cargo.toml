@@ -1,0 +1,14 @@
+[package]
+name = "fskit-s3-manage"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Host-side management logic behind the `fskit-s3-menubar` app: the set of
+# configured *connections* and the *mounts* that realise them. There is no bespoke
+# CLI — the system `mount`/`umount` tools are that — so a connection's config
+# rides as `mount -o` options. Pure Rust (it only shells out to the system mount
+# tools), fully unit-tested and panic-free, with no `objc2`/AppKit dependency.
+[dependencies]
+
+[dev-dependencies]
