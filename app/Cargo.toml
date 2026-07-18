@@ -1,0 +1,21 @@
+[package]
+name = "fskit-s3-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The fskit-s3 macOS app: a status-bar app that manages connections and mounts.
+# It owns both the connection/mount logic (the pure, unit-tested `connection` +
+# `mounts` modules) and the AppKit UI on top (driven via objc2, with every FFI
+# call confined to `appkit.rs`). There is no bespoke CLI — a connection is
+# realised by the system `mount` tool with its config as `-o` options.
+[[bin]]
+name = "fskit-s3-app"
+path = "src/main.rs"
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+# Default features enable the AppKit classes we use (NSApplication, NSStatusItem,
+# NSMenu, …); picking them individually is brittle across point releases.
+objc2-app-kit = "0.3"

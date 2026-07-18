@@ -1,23 +1,41 @@
-//! `fskit-s3-menubar` — a macOS status-bar app to manage fskit-s3 mounts.
+//! `fskit-s3-app` — the macOS app for managing fskit-s3 connections and mounts.
 //!
-//! Shows a menu-bar item whose dropdown lists the configured connections (each
-//! with a *Mount* action) and the currently mounted fskit-s3 volumes (each with
-//! an *Unmount* action), plus *Refresh* and *Quit*. All connection/mount logic is
-//! the shared [`fskit_s3_manage`] crate — the same one the `fskit-s3` CLI uses —
-//! so this file is purely the AppKit UI, driven via `objc2` with all FFI confined
-//! to [`appkit`].
+//! A status-bar app whose dropdown lists the configured **connections** (each
+//! with a *Mount* action) and the currently mounted **volumes** (each with an
+//! *Unmount* action), plus *Refresh* and *Quit*. It owns the whole stack:
 //!
-//! Runs as an `Accessory` app (no Dock tile).
+//! - [`connection`] — the `Connection`/`ConnectionKind`/`Registry` model (a
+//!   connection is a mountable endpoint; today only the in-memory demo, held in
+//!   an in-memory registry).
+//! - [`mounts`] — the mount table + `mount`/`unmount` actions. There is no bespoke
+//!   CLI: mounting is the system `mount` tool with the connection's `-o` options,
+//!   so the app (and a human at a terminal) drive the same command.
+//! - [`appkit`] — the AppKit UI, driven via `objc2`, and the *only* module that
+//!   writes `unsafe` (behind checked helpers).
+//!
+//! The `connection`/`mounts` modules are pure Rust and unit-tested; the app just
+//! adds the UI. Runs as an `Accessory` app (no Dock tile). A connection-config UI
+//! (add/edit S3 endpoints) arrives with real connections — there's nothing to
+//! configure while the only connection is the built-in demo.
 
-// The app must not panic in normal operation.
+// The app must not panic in normal operation: no unwrap/expect/panic/indexing
+// outside tests. Enforced by clippy in CI.
 #![cfg_attr(
     not(test),
-    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::unreachable
+    )
 )]
 
 mod appkit;
+mod connection;
+mod mounts;
 
-use fskit_s3_manage::{self as manage, Registry};
+use connection::Registry;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
@@ -29,7 +47,7 @@ use objc2_app_kit::{
 /// Rust state carried on the ObjC controller instance.
 struct Ivars {
     status_item: Retained<NSStatusItem>,
-    /// The configured connections (in-memory for now; see `fskit_s3_manage`).
+    /// The configured connections (in-memory for now; see [`connection`]).
     registry: Registry,
 }
 
@@ -51,8 +69,8 @@ define_class!(
             let Some(conn) = self.ivars().registry.get(&name) else {
                 return;
             };
-            if let Err(e) = manage::mount(conn, &conn.default_mount_point()) {
-                eprintln!("[menubar] mount {name} failed: {e}");
+            if let Err(e) = mounts::mount(conn, &conn.default_mount_point()) {
+                eprintln!("[app] mount {name} failed: {e}");
             }
             self.rebuild();
         }
@@ -61,8 +79,8 @@ define_class!(
         fn unmount_action(&self, sender: Option<&NSMenuItem>) {
             let Some(item) = sender else { return };
             let Some(path) = appkit::represented_string(item) else { return };
-            if let Err(e) = manage::unmount(&path) {
-                eprintln!("[menubar] unmount {path} failed: {e}");
+            if let Err(e) = mounts::unmount(&path) {
+                eprintln!("[app] unmount {path} failed: {e}");
             }
             self.rebuild();
         }
@@ -125,11 +143,11 @@ impl Controller {
 
         // Active mounts — each unmountable.
         menu.addItem(&appkit::menu_item(mtm, "Mounted", None, None, None, false));
-        let mounts = manage::list_fskit();
-        if mounts.is_empty() {
+        let mounted = mounts::list_fskit();
+        if mounted.is_empty() {
             menu.addItem(&appkit::menu_item(mtm, "None", None, None, None, false));
         } else {
-            for m in &mounts {
+            for m in &mounted {
                 menu.addItem(&appkit::menu_item(
                     mtm,
                     &format!("Unmount  {}", m.mount_point),
@@ -165,7 +183,7 @@ impl Controller {
 
 fn main() {
     let Some(mtm) = MainThreadMarker::new() else {
-        eprintln!("[menubar] must run on the main thread");
+        eprintln!("[app] must run on the main thread");
         return;
     };
 

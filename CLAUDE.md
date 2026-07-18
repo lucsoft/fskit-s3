@@ -101,21 +101,22 @@ prefix).
   against a `StorageBackend` on a tokio runtime; mutating ops reply `EROFS`.
   `lib.rs`: `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
   `fskit_s3_make_filesystem` entry point.
-- **`manage/src/`** — `fskit-s3-manage`, the **host-side management logic** behind
-  the app: `connection.rs` holds the `Connection`/`ConnectionKind`/`Registry`
-  model (a *connection* is a mountable endpoint; today only the in-memory `Demo`,
-  held in an in-memory registry seeded from `Registry::with_defaults`), and
-  `mount.rs` is the mount table + `mount` (`mount -F -t fskit-s3 [-o …] …`) /
-  `unmount` actions. A connection's config rides as `-o` options
-  (`Connection::mount_options`), so there is **no bespoke CLI** — the system
-  `mount`/`umount` are that. Pure Rust (shells out to `mount`/`diskutil`), no
-  `objc2` — fully unit-tested, panic-denied.
-- **`menubar/src/`** — `fskit-s3-menubar`, the macOS app (a status-bar app,
-  `objc2` + AppKit). The dropdown lists connections (each *Mount*) and active
-  mounts (each *Unmount*), all via `fskit-s3-manage`; `appkit.rs` is the *only*
-  module that writes `unsafe`, behind checked helpers. A connection-config UI
-  (add/edit S3 endpoints) arrives with real connections — nothing to configure
-  while the only connection is the built-in demo.
+- **`app/src/`** — `fskit-s3-app`, the macOS app (a status-bar app), which owns
+  both the management logic and the UI:
+  - `connection.rs` — the `Connection`/`ConnectionKind`/`Registry` model (a
+    *connection* is a mountable endpoint; today only the in-memory `Demo`, held in
+    an in-memory registry seeded from `Registry::with_defaults`).
+  - `mounts.rs` — the mount table + `mount` (`mount -F -t fskit-s3 [-o …] …`) /
+    `unmount` actions. A connection's config rides as `-o` options
+    (`Connection::mount_options`), so there is **no bespoke CLI** — the system
+    `mount`/`umount` are that. These two modules are pure Rust (shell out to
+    `mount`/`diskutil`), fully unit-tested, panic-denied.
+  - `main.rs` + `appkit.rs` — the AppKit UI (`objc2`): the dropdown lists
+    connections (each *Mount*) and active mounts (each *Unmount*). `appkit.rs` is
+    the *only* module that writes `unsafe`, behind checked helpers.
+
+  A connection-config UI (add/edit S3 endpoints) arrives with real connections —
+  nothing to configure while the only connection is the built-in demo.
 - **`xcode/`** — the non-Rust packaging: the ~8-line Swift `@main`
   `UnaryFileSystemExtension` bootstrap (returns the Rust class via
   `fskit_s3_make_filesystem`), bridging header, entitlements, and a build recipe.
@@ -144,7 +145,7 @@ with the connection's config as `-o` options, so the two ways to mount are the
 app and a plain `mount` command. Once the extension is installed and enabled:
 
 ```bash
-cargo run -p fskit-s3-menubar          # the app: ☁ menu-bar item, Mount/Unmount per connection
+cargo run -p fskit-s3-app               # the app: ☁ menu-bar item, Mount/Unmount per connection
 # …or the equivalent by hand (what the app runs under the hood):
 mount -F -t fskit-s3 ~/fskit-s3/.sources/demo ~/fskit-s3/demo
 umount ~/fskit-s3/demo
@@ -234,5 +235,5 @@ before investing. Current target is the general bucket mount.
   by clippy outside `#[cfg(test)]` (see the `deny(...)` attrs in `core`/`backend`).
   Prefer `?`, `match`, `.get(..).unwrap_or(..)`, and saturating/checked arithmetic.
 - **Wrap `unsafe` in checked safe functions.** All `objc2`/FFI `unsafe` (ext,
-  menubar) lives behind a small safe wrapper that validates arguments and
+  app) lives behind a small safe wrapper that validates arguments and
   null/again-checks results; callers never write `unsafe` directly.
