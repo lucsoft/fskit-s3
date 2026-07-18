@@ -8,14 +8,28 @@
 //! with `SAFETY:` comments.
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Sel};
+use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSMenu, NSMenuItem, NSStatusItem};
+use objc2_app_kit::{NSMenu, NSMenuDelegate, NSMenuItem, NSStatusItem};
 use objc2_foundation::NSString;
 
 /// A fresh, empty menu.
 pub fn menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
     NSMenu::new(mtm)
+}
+
+/// Make `delegate` the menu's delegate. Its `menuNeedsUpdate:` is then called
+/// before every display, so the caller can rebuild the menu on demand.
+///
+/// The menu holds the delegate weakly, so the caller must keep it alive for as
+/// long as the menu exists (the controller does — it lives for the whole run).
+pub fn set_menu_delegate(menu: &NSMenu, delegate: &ProtocolObject<dyn NSMenuDelegate>) {
+    menu.setDelegate(Some(delegate));
+}
+
+/// Remove every item from a menu (called before repopulating it).
+pub fn clear_menu(menu: &NSMenu) {
+    menu.removeAllItems();
 }
 
 /// A separator menu item.

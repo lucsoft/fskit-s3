@@ -2,7 +2,9 @@
 //!
 //! A status-bar app whose dropdown lists the configured **connections** (each
 //! with a *Mount* action) and the currently mounted **volumes** (each with an
-//! *Unmount* action), plus *Refresh* and *Quit*. It owns the whole stack:
+//! *Unmount* action), plus *Quit*. The menu rebuilds itself every time it opens
+//! (via the `NSMenuDelegate` hook), so the mount list is always current — no
+//! manual refresh. It owns the whole stack:
 //!
 //! - [`connection`] — the `Connection`/`ConnectionKind`/`Registry` model (a
 //!   connection is a mountable endpoint; today only the in-memory demo, held in
@@ -10,8 +12,7 @@
 //! - [`mounts`] — the mount table + `mount`/`unmount` actions. There is no bespoke
 //!   CLI: mounting is the system `mount` tool with the connection's `-o` options,
 //!   so the app (and a human at a terminal) drive the same command.
-//! - [`appkit`] — the AppKit UI, driven via `objc2`, and the *only* module that
-//!   writes `unsafe` (behind checked helpers).
+//! - [`appkit`] — checked wrappers over the AppKit calls, where the FFI lives.
 //!
 //! The `connection`/`mounts` modules are pure Rust and unit-tested; the app just
 //! adds the UI. Runs as an `Accessory` app (no Dock tile). A connection-config UI
@@ -37,11 +38,11 @@ mod mounts;
 
 use connection::Registry;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength,
+    NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar,
+    NSStatusItem, NSVariableStatusItemLength,
 };
 
 /// Rust state carried on the ObjC controller instance.
@@ -52,7 +53,7 @@ struct Ivars {
 }
 
 define_class!(
-    // A plain NSObject subclass that serves as the menu's target/action handler.
+    // A plain NSObject subclass that serves as the menu's delegate + action handler.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "FskitS3MenuController"]
@@ -72,7 +73,6 @@ define_class!(
             if let Err(e) = mounts::mount(conn, &conn.default_mount_point()) {
                 eprintln!("[app] mount {name} failed: {e}");
             }
-            self.rebuild();
         }
 
         #[unsafe(method(unmount:))]
@@ -82,12 +82,6 @@ define_class!(
             if let Err(e) = mounts::unmount(&path) {
                 eprintln!("[app] unmount {path} failed: {e}");
             }
-            self.rebuild();
-        }
-
-        #[unsafe(method(refresh:))]
-        fn refresh_action(&self, _sender: Option<&AnyObject>) {
-            self.rebuild();
         }
 
         #[unsafe(method(quit:))]
@@ -99,6 +93,15 @@ define_class!(
     }
 
     unsafe impl NSObjectProtocol for Controller {}
+
+    // The menu asks its delegate to rebuild it right before each display, so the
+    // contents are always current without a manual refresh action.
+    unsafe impl NSMenuDelegate for Controller {
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            self.populate(menu);
+        }
+    }
 );
 
 impl Controller {
@@ -107,22 +110,25 @@ impl Controller {
             status_item,
             registry: Registry::with_defaults(),
         });
-        // SAFETY: `this` is a `PartialInit<Self>` — a fresh `alloc()` whose ivars
-        // were just populated by `set_ivars` — so it has been allocated but not
-        // yet initialized, exactly the state `-init` requires. `super(this)`
-        // dispatches to the superclass `NSObject`'s designated initializer, which
-        // takes no arguments and has no further preconditions; it consumes the
-        // partial init and yields the initialized, owned `Retained<Self>`.
-        unsafe { msg_send![super(this), init] }
+        // SAFETY: `this` is a fresh alloc()+set_ivars, not yet initialized — the precondition of NSObject's designated `-init`.
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+
+        // Attach an (empty) menu whose delegate is this controller; it fills in
+        // `menuNeedsUpdate:` on every open, so the list is always fresh.
+        let menu = appkit::menu(mtm);
+        appkit::set_menu_delegate(&menu, ProtocolObject::from_ref(&*this));
+        appkit::set_menu(&this.ivars().status_item, &menu);
+        this
     }
 
-    /// Rebuild the dropdown from the current connections + mount list.
-    fn rebuild(&self) {
+    /// Fill `menu` with the current connections + mounts. Called by the delegate
+    /// before every display.
+    fn populate(&self, menu: &NSMenu) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
+        appkit::clear_menu(menu);
         let target: &AnyObject = self;
-        let menu = appkit::menu(mtm);
 
         // Connections — each mountable.
         menu.addItem(&appkit::menu_item(
@@ -167,22 +173,12 @@ impl Controller {
         menu.addItem(&appkit::separator(mtm));
         menu.addItem(&appkit::menu_item(
             mtm,
-            "Refresh",
-            Some(sel!(refresh:)),
-            Some(target),
-            None,
-            true,
-        ));
-        menu.addItem(&appkit::menu_item(
-            mtm,
             "Quit",
             Some(sel!(quit:)),
             Some(target),
             None,
             true,
         ));
-
-        appkit::set_menu(&self.ivars().status_item, &menu);
     }
 }
 
@@ -199,10 +195,9 @@ fn main() {
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     appkit::set_status_title(&status_item, "☁", mtm);
 
+    // The controller owns the status item + menu; keep it alive for the whole run.
     let controller = Controller::new(mtm, status_item);
-    controller.rebuild();
 
-    // The controller owns the status item; keep it alive for the whole run.
     app.run();
     drop(controller);
 }
