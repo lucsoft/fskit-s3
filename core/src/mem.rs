@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{path, Entry, StorageBackend, StorageError};
+use crate::{async_trait, path, Entry, StorageBackend, StorageError};
 
 /// A read-only in-memory store. Keys are object paths without a leading slash,
 /// e.g. `photos/2026/img.jpg`.
@@ -34,8 +34,9 @@ impl InMemoryBackend {
     }
 }
 
+#[async_trait]
 impl StorageBackend for InMemoryBackend {
-    fn list(&self, dir: &str) -> Result<Vec<Entry>, StorageError> {
+    async fn list(&self, dir: &str) -> Result<Vec<Entry>, StorageError> {
         let dir = path::normalize(dir);
         let prefix = path::to_key(&dir, true); // "" for root, "a/b/" otherwise
 
@@ -56,7 +57,9 @@ impl StorageBackend for InMemoryBackend {
         let mut files: Vec<Entry> = Vec::new();
         let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for (key, bytes) in &self.objects {
-            let Some(rest) = key.strip_prefix(&prefix) else { continue };
+            let Some(rest) = key.strip_prefix(&prefix) else {
+                continue;
+            };
             if rest.is_empty() {
                 continue;
             }
@@ -74,7 +77,7 @@ impl StorageBackend for InMemoryBackend {
         Ok(out)
     }
 
-    fn stat(&self, path: &str) -> Result<Entry, StorageError> {
+    async fn stat(&self, path: &str) -> Result<Entry, StorageError> {
         let norm = path::normalize(path);
         if norm == "/" {
             return Ok(Entry::dir(""));
@@ -91,7 +94,7 @@ impl StorageBackend for InMemoryBackend {
         Err(StorageError::NotFound)
     }
 
-    fn read(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, StorageError> {
+    async fn read(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, StorageError> {
         let norm = path::normalize(path);
         let key = path::to_key(&norm, false);
         let Some(bytes) = self.objects.get(&key) else {
@@ -122,10 +125,10 @@ mod tests {
         b
     }
 
-    #[test]
-    fn root_lists_files_and_synth_dirs() {
+    #[tokio::test]
+    async fn root_lists_files_and_synth_dirs() {
         let b = sample();
-        let entries = b.list("/").unwrap();
+        let entries = b.list("/").await.unwrap();
         let names: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.kind)).collect();
         assert_eq!(
             names,
@@ -133,41 +136,50 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nested_listing() {
+    #[tokio::test]
+    async fn nested_listing() {
         let b = sample();
-        let entries = b.list("/photos").unwrap();
+        let entries = b.list("/photos").await.unwrap();
         let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["2026", "cover.png"]);
 
-        let deep = b.list("/photos/2026").unwrap();
+        let deep = b.list("/photos/2026").await.unwrap();
         assert_eq!(deep.len(), 2);
         assert_eq!(deep[0].name, "a.jpg");
         assert_eq!(deep[0].size, 10);
     }
 
-    #[test]
-    fn stat_variants() {
+    #[tokio::test]
+    async fn stat_variants() {
         let b = sample();
-        assert!(b.stat("/").unwrap().is_dir());
-        assert!(b.stat("/photos").unwrap().is_dir());
-        assert_eq!(b.stat("/readme.txt").unwrap().size, 11);
-        assert!(matches!(b.stat("/nope"), Err(StorageError::NotFound)));
+        assert!(b.stat("/").await.unwrap().is_dir());
+        assert!(b.stat("/photos").await.unwrap().is_dir());
+        assert_eq!(b.stat("/readme.txt").await.unwrap().size, 11);
+        assert!(matches!(b.stat("/nope").await, Err(StorageError::NotFound)));
     }
 
-    #[test]
-    fn ranged_reads_and_eof() {
+    #[tokio::test]
+    async fn ranged_reads_and_eof() {
         let b = sample();
-        assert_eq!(b.read("/readme.txt", 0, 5).unwrap(), b"hello");
-        assert_eq!(b.read("/readme.txt", 6, 100).unwrap(), b"world"); // short read at EOF
-        assert_eq!(b.read("/readme.txt", 100, 10).unwrap(), b""); // past EOF
-        assert!(matches!(b.read("/photos", 0, 1), Err(StorageError::NotAFile)));
-        assert!(matches!(b.read("/missing", 0, 1), Err(StorageError::NotFound)));
+        assert_eq!(b.read("/readme.txt", 0, 5).await.unwrap(), b"hello");
+        assert_eq!(b.read("/readme.txt", 6, 100).await.unwrap(), b"world"); // short read at EOF
+        assert_eq!(b.read("/readme.txt", 100, 10).await.unwrap(), b""); // past EOF
+        assert!(matches!(
+            b.read("/photos", 0, 1).await,
+            Err(StorageError::NotAFile)
+        ));
+        assert!(matches!(
+            b.read("/missing", 0, 1).await,
+            Err(StorageError::NotFound)
+        ));
     }
 
-    #[test]
-    fn listing_a_file_is_notdir() {
+    #[tokio::test]
+    async fn listing_a_file_is_notdir() {
         let b = sample();
-        assert!(matches!(b.list("/readme.txt"), Err(StorageError::NotADirectory)));
+        assert!(matches!(
+            b.list("/readme.txt").await,
+            Err(StorageError::NotADirectory)
+        ));
     }
 }

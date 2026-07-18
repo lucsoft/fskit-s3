@@ -1,0 +1,24 @@
+[package]
+name = "fskit-s3-backend"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The concrete backend, implemented once over Apache OpenDAL. Every storage
+# service OpenDAL supports (S3 today; WebDAV/SFTP later) becomes available by
+# enabling its `services-*` feature and adding a constructor — the FSKit side
+# never changes because everything is funneled through `StorageBackend`.
+[dependencies]
+fskit-s3-core = { workspace = true }
+opendal = { version = "0.54", default-features = false, features = [
+    "services-s3",
+] }
+
+[dev-dependencies]
+# The in-memory service backs the adapter tests: real OpenDAL list/stat/read
+# semantics, no live bucket.
+opendal = { version = "0.54", default-features = false, features = [
+    "services-s3",
+    "services-memory",
+] }
+tokio = { version = "1", features = ["rt", "macros"] }

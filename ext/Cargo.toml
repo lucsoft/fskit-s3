@@ -18,7 +18,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 fskit-s3-core = { workspace = true, features = ["mem"] }
-fskit-s3-backend-s3 = { workspace = true }
+fskit-s3-backend = { workspace = true }
+# Async runtime lives in the extension: each FSKit op spawns a task and fires the
+# reply block on completion (see module docs).
+tokio = { version = "1", features = ["rt-multi-thread"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 block2 = "0.6"

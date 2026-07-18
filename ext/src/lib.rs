@@ -7,6 +7,21 @@
 //! FSKit's classes, `define_class!` to subclass them, `objc2::rc::Retained` for
 //! ownership, `block2` for the reply handlers.
 //!
+//! ## Async bridging
+//!
+//! The extension owns a multi-threaded tokio runtime. FSKit hands each operation
+//! a reply block; the handler `Retained`s that block, `runtime.spawn`s the
+//! `StorageBackend` future, and invokes the block from the task on completion.
+//! The FSKit queue thread is never parked on network I/O, so many reads (Finder
+//! previews, parallel copies) proceed concurrently.
+//!
+//! ## Configuration
+//!
+//! Bucket/endpoint/credentials are read from the **macOS Keychain** when the
+//! volume loads (`loadResource:`), keyed by the resource identity — no plaintext
+//! secrets on disk, and it fits the app-extension sandbox. Until that path
+//! exists, [`VolumeState::demo`] mounts a credential-free in-memory volume.
+//!
 //! ## What FSKit asks of us
 //!
 //! A "unary" file system (one volume per resource, which is our model — one
@@ -125,13 +140,13 @@ const fn libc_enoent() -> i32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn demo_backend_is_mountable_shape() {
+    #[tokio::test]
+    async fn demo_backend_is_mountable_shape() {
         let v = VolumeState::demo();
-        let root = v.backend.list("/").unwrap();
+        let root = v.backend.list("/").await.unwrap();
         let names: Vec<_> = root.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["photos", "readme.txt"]);
-        assert_eq!(v.backend.read("/readme.txt", 0, 4).unwrap(), b"moun");
+        assert_eq!(v.backend.read("/readme.txt", 0, 4).await.unwrap(), b"moun");
     }
 
     #[test]

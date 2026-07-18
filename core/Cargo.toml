@@ -4,13 +4,18 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
-# The seam that FSKit is mapped onto. Deliberately dependency-free so it builds
-# and tests on any host (no Apple frameworks, no network stack) — `cargo test -p
-# fskit-s3-core` is the fast inner loop. Concrete backends (S3, later WebDAV/SSH)
-# live in sibling crates and only have to implement `StorageBackend`.
+# The seam that FSKit is mapped onto. Kept small and backend-free: just the async
+# `StorageBackend` trait, path/key helpers, and an in-memory backend for tests +
+# a no-credential demo mount. Concrete backends live in `../backend` (OpenDAL).
+# `cargo test -p fskit-s3-core` is the fast inner loop.
 [dependencies]
+# async fn in a dyn-compatible trait (we hand FSKit an `Arc<dyn StorageBackend>`).
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [features]
-# Expose `InMemoryBackend` outside of tests — lets the ext crate mount a demo
-# volume with no credentials while the S3 backend is still being wired up.
+# Expose `InMemoryBackend` outside of tests — lets the ext mount a demo volume
+# with no credentials while the real backend/config path is still being wired up.
 mem = []

@@ -4,19 +4,21 @@
 //! directory", "stat this path", "read this byte range" — and does not care how
 //! they are satisfied. That indifference is the seam: [`StorageBackend`] is the
 //! whole contract, and the FSKit glue in the `ext` crate is written against the
-//! trait, never against S3. S3 is merely the first implementor
-//! (`fskit-s3-backend-s3`); WebDAV/SSH can be added later as new crates without
-//! touching the FSKit side.
+//! trait, never against S3. The `fskit-s3-backend` crate implements it once over
+//! Apache OpenDAL, so S3 is just the first enabled service; WebDAV/SFTP are a
+//! feature flag away without touching the FSKit side.
 //!
-//! The trait is intentionally **blocking**. FSKit invokes volume operations on
-//! its own dispatch queues and wants a reply block called when the work is done,
-//! so a backend that blocks on network I/O maps directly onto that model without
-//! dragging an async runtime into the extension. If a backend needs concurrency
-//! it can manage its own internally.
+//! The trait is **async**. A network filesystem is latency-bound and Finder/
+//! Photos issue many reads in parallel, so the ext holds a tokio runtime and
+//! each FSKit operation `await`s the backend and fires its reply block on
+//! completion — no queue thread is parked per in-flight read. `async-trait`
+//! keeps the trait dyn-compatible so the ext can hold an `Arc<dyn StorageBackend>`.
 
 use std::error::Error;
 use std::fmt;
 use std::time::SystemTime;
+
+pub use async_trait::async_trait;
 
 pub mod path;
 
@@ -54,11 +56,23 @@ pub struct Entry {
 
 impl Entry {
     pub fn file(name: impl Into<String>, size: u64) -> Self {
-        Entry { name: name.into(), kind: EntryKind::File, size, modified: None, etag: None }
+        Entry {
+            name: name.into(),
+            kind: EntryKind::File,
+            size,
+            modified: None,
+            etag: None,
+        }
     }
 
     pub fn dir(name: impl Into<String>) -> Self {
-        Entry { name: name.into(), kind: EntryKind::Dir, size: 0, modified: None, etag: None }
+        Entry {
+            name: name.into(),
+            kind: EntryKind::Dir,
+            size: 0,
+            modified: None,
+            etag: None,
+        }
     }
 
     pub fn is_dir(&self) -> bool {
@@ -102,20 +116,21 @@ impl Error for StorageError {}
 /// Paths are absolute, `/`-separated, and normalized (see [`path`]): the root is
 /// `"/"`, no trailing slash otherwise, no `.`/`..` components. A backend may
 /// assume it receives already-normalized paths from the `ext` crate.
+#[async_trait]
 pub trait StorageBackend: Send + Sync {
     /// Immediate children of a directory. `dir` is `"/"` for the root.
     ///
     /// Returns [`StorageError::NotFound`] if the directory does not exist and
     /// [`StorageError::NotADirectory`] if the path is a file.
-    fn list(&self, dir: &str) -> Result<Vec<Entry>, StorageError>;
+    async fn list(&self, dir: &str) -> Result<Vec<Entry>, StorageError>;
 
     /// Metadata for a single path. The returned [`Entry::name`] is the basename
     /// of `path` (the root reports itself as a directory named `""`).
-    fn stat(&self, path: &str) -> Result<Entry, StorageError>;
+    async fn stat(&self, path: &str) -> Result<Entry, StorageError>;
 
     /// Read up to `len` bytes starting at `offset` from a file.
     ///
     /// A short read (fewer than `len` bytes) signals end-of-file and is not an
     /// error. Returns [`StorageError::NotAFile`] for a directory.
-    fn read(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, StorageError>;
+    async fn read(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, StorageError>;
 }
