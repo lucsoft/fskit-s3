@@ -1,0 +1,16 @@
+[package]
+name = "fskit-s3-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The seam that FSKit is mapped onto. Deliberately dependency-free so it builds
+# and tests on any host (no Apple frameworks, no network stack) — `cargo test -p
+# fskit-s3-core` is the fast inner loop. Concrete backends (S3, later WebDAV/SSH)
+# live in sibling crates and only have to implement `StorageBackend`.
+[dependencies]
+
+[features]
+# Expose `InMemoryBackend` outside of tests — lets the ext crate mount a demo
+# volume with no credentials while the S3 backend is still being wired up.
+mem = []

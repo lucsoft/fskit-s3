@@ -1,0 +1,14 @@
+[package]
+name = "fskit-s3-backend-s3"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The S3 `StorageBackend`. Blocking HTTP (ureq) matches core's blocking trait and
+# FSKit's reply-block model — no async runtime pulled into the extension.
+[dependencies]
+fskit-s3-core = { workspace = true }
+ureq = "2"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+# backend-s3 and ext are added back as they're fleshed out (they pull network /
+# Apple-framework deps); core stays dependency-free and always builds.
+members = ["core", "backend-s3"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/lucsoft/fskit-s3"
+
+[workspace.dependencies]
+fskit-s3-core = { path = "core" }
+fskit-s3-backend-s3 = { path = "backend-s3" }

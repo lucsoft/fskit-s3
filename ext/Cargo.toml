@@ -1,0 +1,24 @@
+[package]
+name = "fskit-s3-ext"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The FSKit extension binary: an ObjC `FSUnaryFileSystem` subclass (defined from
+# Rust via objc2) that delegates every list/stat/read to a `StorageBackend`.
+# Builds into the Mach-O that lives inside the `.appex` bundle (see ../bundle).
+#
+# STATUS: skeleton. The objc2 bindings for FSKit are hand-written here (no
+# published `objc2-fs-kit` crate yet) and the crate is NOT in the workspace
+# `members` yet — it links the FSKit framework and only produces something
+# loadable once assembled + codesigned as an app extension (full Xcode). The
+# core + backend-s3 crates it depends on are already complete and tested.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fskit-s3-core = { workspace = true, features = ["mem"] }
+fskit-s3-backend-s3 = { workspace = true }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"
