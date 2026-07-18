@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Info.plist for the ExtensionKit FSKit extension target. The
-     EXAppExtensionAttributes / EXExtensionPointIdentifier is what marks this
-     bundle as an FSKit module. -->
+<!-- Info.plist for the ExtensionKit FSKit extension target.
+     The FSKit module attributes (short name, supported resource kinds) live
+     INSIDE EXAppExtensionAttributes — that's where FSKit/mount read them (verified
+     against Apple's msdos and fuse-t modules). We're a device-less filesystem, so
+     we accept a PathURL resource (FSSupportsPathURLs), not a block device. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -21,10 +23,14 @@
     <dict>
         <key>EXExtensionPointIdentifier</key>
         <string>com.apple.fskit.fsmodule</string>
+        <key>FSShortName</key>
+        <string>fskit-s3</string>
+        <key>FSSupportsBlockResources</key>
+        <false/>
+        <key>FSSupportsPathURLs</key>
+        <true/>
+        <key>FSSupportsServerURLs</key>
+        <false/>
     </dict>
-    <key>FSShortName</key>
-    <string>fskit-s3</string>
-    <key>FSSupportsBlockResources</key>
-    <false/>
 </dict>
 </plist>

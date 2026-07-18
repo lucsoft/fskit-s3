@@ -41,10 +41,11 @@ membership (the capability isn't available to free teams).
 1. Scheme **fskit-s3-host** ▸ **Build & Run** (this signs + registers the extension).
 2. Enable it: **System Settings ▸ General ▸ Login Items & Extensions ▸ File
    System Extensions** ▸ turn on *fskit-s3*.
-3. Mount the demo volume:
+3. Mount the demo volume. We declare `FSSupportsPathURLs`, so the resource
+   argument is a **path** (any existing one — the demo ignores it):
    ```sh
-   mkdir -p /tmp/fskit-s3
-   mount -F -t fskit-s3 dummy /tmp/fskit-s3
+   mkdir -p /tmp/fskit-s3-src /tmp/fskit-s3
+   mount -F -t fskit-s3 /tmp/fskit-s3-src /tmp/fskit-s3
    ls /tmp/fskit-s3             # -> photos/  readme.txt
    cat /tmp/fskit-s3/readme.txt # -> mounted by fskit-s3
    ```
