@@ -149,19 +149,24 @@ impl FileSystem {
     }
 }
 
-/// Return the loaded container to `notReady`, from anywhere in the extension.
+/// Return the loaded container to `notReady`, from anywhere in the extension,
+/// carrying the failure as the container's status when known.
 ///
 /// `loadResource` marks the container `ready` before the mount's `-o` options are
 /// available, so the backend is only chosen later in the volume's `activate`. When
 /// that fails (bad config / no secret), signal the container back to `notReady`
 /// so fskitd can tear the loaded resource down instead of leaving the instance
 /// stuck (which makes the next mount fail at probe with "Resource busy").
-pub fn signal_container_not_ready() {
+///
+/// `status` is the reason (the same `NSError` the op replies with) — passed to
+/// `notReadyWithStatus:` so fskitd/logs get the actual failure, not a bare
+/// not-ready.
+pub fn signal_container_not_ready(status: Option<&NSError>) {
     if let Some(&ptr) = FILESYSTEM.get() {
         // SAFETY: the cached pointer is our leaked, process-lifetime FileSystem
         // singleton (set in `fskit_s3_make_filesystem`).
         let fs = unsafe { &*(ptr as *const FileSystem) };
-        fs.set_container_state(ContainerState::NotReady);
+        fs.setContainerStatus(&FSContainerStatus::notReadyWithStatus(status));
     }
 }
 

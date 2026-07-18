@@ -122,15 +122,14 @@ define_class!(
                 }
                 Err(msg) => {
                     crate::log_line(&format!("activate failed: {msg}"));
-                    // Signal the loaded container back to `notReady` so fskitd can
-                    // tear this instance down instead of leaving it stuck holding
-                    // the resource (which makes the next mount fail at probe with
+                    // Signal the loaded container back to `notReady` — carrying the
+                    // same error we reply with — so fskitd can tear this instance
+                    // down (with the reason) instead of leaving it stuck holding the
+                    // resource (which makes the next mount fail at probe with
                     // "Resource busy").
-                    crate::signal_container_not_ready();
-                    reply.call((
-                        ptr::null_mut(),
-                        Retained::as_ptr(&err(libc::EINVAL)) as *mut NSError,
-                    ));
+                    let e = err(libc::EINVAL);
+                    crate::signal_container_not_ready(Some(&e));
+                    reply.call((ptr::null_mut(), Retained::as_ptr(&e) as *mut NSError));
                     return;
                 }
             }
