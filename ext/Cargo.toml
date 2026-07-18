@@ -7,16 +7,18 @@ license.workspace = true
 # The FSKit extension logic, in Rust. Defines the FSUnaryFileSystem / FSVolume /
 # FSItem subclasses via objc2 and delegates every operation to a StorageBackend.
 # Built as a `staticlib` and linked into an Xcode-managed .appex (which handles
-# the extension-point plumbing, entitlements, and signing). A tiny ObjC stub in
-# that target calls `fskit_s3_register` from +load so the Rust-defined classes
-# are registered before FSKit looks up the principal class.
+# the extension-point plumbing, entitlements, and signing). The Swift @main
+# bootstrap calls `fskit_s3_make_filesystem` to get our Rust FSUnaryFileSystem.
 [lib]
 name = "fskit_s3_ext"
 crate-type = ["staticlib"]
 
 [dependencies]
 fskit-s3-core = { workspace = true, features = ["mem"] }
-fskit-s3-backend = { workspace = true }
+# NOTE: fskit-s3-backend (OpenDAL/reqwest/rustls) is intentionally NOT a
+# dependency yet. The demo mount uses the in-memory backend, so the staticlib
+# links only FSKit + Foundation + libSystem — no Security/SystemConfiguration
+# framework juggling in Xcode. Add it back when wiring the S3 backend + Keychain.
 tokio = { version = "1", features = ["rt-multi-thread"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [

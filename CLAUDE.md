@@ -94,15 +94,22 @@ prefix).
   `Operator`; `S3Config` + `::s3()` constructor. Tested against OpenDAL's
   in-memory service; an ignored `live_s3_roundtrip` test runs against the
   `compose.yaml` RustFS.
-- **`ext/src/lib.rs`** — FSKit glue (**skeleton**): the `objc2`
-  `FSUnaryFileSystem` subclass + tokio bridge + `StorageError`→errno mapping.
-  Not yet in the workspace build.
+- **`ext/`** — the FSKit extension, in Rust (`staticlib`). `sys.rs`:
+  hand-written `objc2` bindings for FSKit classes + the three volume protocols.
+  `item.rs`: `FSKitS3Item` (`FSItem` subclass carrying the path). `volume.rs`:
+  `FSKitS3Volume` — the read path (activate/lookup/getAttributes/enumerate/read)
+  against a `StorageBackend` on a tokio runtime; mutating ops reply `EROFS`.
+  `lib.rs`: `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
+  `fskit_s3_make_filesystem` entry point.
 - **`menubar/src/`** — `fskit-s3-menubar`, a macOS status-bar app (`objc2` +
   AppKit) that lists and unmounts fskit-s3 volumes. `mounts.rs` is pure/tested;
   `appkit.rs` is the *only* module that writes `unsafe`, behind checked helpers.
-- **`bundle/`** — `.appex`/host-app `Info.plist`, entitlements, and a Makefile
-  that assembles + codesigns the module. **Templates** — reconcile against
-  Xcode's FSKit target.
+- **`xcode/`** — the non-Rust packaging: the ~8-line Swift `@main`
+  `UnaryFileSystemExtension` bootstrap (returns the Rust class via
+  `fskit_s3_make_filesystem`), bridging header, entitlements, and a build recipe.
+  ExtensionKit requires this Swift entry; all logic stays in Rust.
+- **`scripts/build-ext-staticlib.sh`** — Xcode Run Script phase: builds the
+  `ext` staticlib for the target arch(es) and drops it in `$BUILT_PRODUCTS_DIR`.
 - **`compose.yaml`** — RustFS (S3-compatible) for local backend testing.
 
 ## Build & test
@@ -113,9 +120,10 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 ```
 
-`ext` is **not** in the workspace `members`: it links Apple frameworks and only
-yields a loadable module once assembled + codesigned as an app extension. Add it
-back to `members` once its bindings compile against a full Xcode toolchain.
+`ext` builds as a `staticlib` with `cargo` (no Xcode needed to compile it). It
+only becomes a *loadable* module once linked into the Xcode ExtensionKit target
+and codesigned — see `xcode/README.md`. The `com.apple.developer.fskit.fsmodule`
+entitlement generally needs a paid Apple Developer Program membership.
 
 ### Adding a storage backend (e.g. WebDAV)
 
