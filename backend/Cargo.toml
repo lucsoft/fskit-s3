@@ -22,3 +22,7 @@ opendal = { version = "0.54", default-features = false, features = [
     "services-memory",
 ] }
 tokio = { version = "1", features = ["rt", "macros"] }
+# Only to construct an `opendal::Metadata` with a known last-modified time when
+# unit-testing the time conversion (the memory service reports none). `std` gives
+# `DateTime::from_timestamp`; no wall clock needed, so no `clock` feature.
+chrono = { version = "0.4", default-features = false, features = ["std"] }

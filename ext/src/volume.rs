@@ -261,7 +261,14 @@ define_class!(
                 // Pack the attributes inline — FSKit drops entries that lack them,
                 // and faults if the set is incomplete (same rule as getAttributes).
                 let attrs = FSItemAttributes::new();
-                fill_attributes(&attrs, entry.is_dir(), entry.size, id, parent_id);
+                fill_attributes(
+                    &attrs,
+                    entry.is_dir(),
+                    entry.size,
+                    entry.modified,
+                    id,
+                    parent_id,
+                );
                 let packed = packer.packEntry(&fname, item_type, id, next_cookie, Some(&attrs));
                 if !packed {
                     break; // buffer full; FSKit will call again with this cookie
@@ -559,24 +566,26 @@ impl S3Volume {
     }
 
     /// Build an `FSItemAttributes` snapshot for an item, reporting the file's
-    /// *current* size — the authoritative source is `stat` (per the object-store
-    /// model), so a file just written or truncated shows its real size instead of
-    /// the stale size cached on the `FSItem` at lookup time. Directories are size
-    /// 0; if the stat fails, fall back to the cached size.
+    /// *current* size and modify time — the authoritative source is `stat` (per
+    /// the object-store model), so a file just written or truncated shows its real
+    /// size, and the mtime is the object's stable `last_modified` rather than a
+    /// per-call "now" (which made editors warn the file "changed since reading").
+    /// Directories are size 0; if the stat fails, fall back to the cached size.
     fn fresh_attributes(&self, item: &S3Item) -> Retained<FSItemAttributes> {
-        let size = if item.is_dir() {
-            0
+        let stat = if item.is_dir() {
+            None
         } else {
             self.backend()
                 .and_then(|b| self.ivars().rt.block_on(b.stat(item.path())).ok())
-                .map(|e| e.size)
-                .unwrap_or_else(|| item.size())
         };
+        let size = stat.as_ref().map(|e| e.size).unwrap_or_else(|| item.size());
+        let modified = stat.as_ref().and_then(|e| e.modified);
         let attrs = FSItemAttributes::new();
         fill_attributes(
             &attrs,
             item.is_dir(),
             size,
+            modified,
             item.item_id(),
             item_id_for(corepath::parent(item.path())),
         );
@@ -588,13 +597,20 @@ impl S3Volume {
 ///
 /// FSKit faults ("Reported attributes are incomplete") unless the snapshot carries
 /// `type`, `mode`, `linkCount`, `uid`, `gid`, `flags`, `size`, `allocSize`,
-/// `fileID`, `parentID`, and the access/modify/change/birth timestamps — even a
-/// read-only volume must report them all. Timestamps default to "now"; the backend
-/// entries don't carry reliable per-object times.
+/// `fileID`, `parentID`, and the access/modify/change/birth timestamps — every op
+/// that reports attributes must report them all.
+///
+/// `modified` is the object's real last-modified time when the backend knows it
+/// (S3 does); the timestamp MUST be stable across calls, or editors warn the file
+/// "changed since reading it" (mtime seen at open < mtime seen at save). When the
+/// backend has no time (directories/prefixes, the in-memory demo), fall back to a
+/// single process-stable instant rather than "now" — still constant per mount, so
+/// no spurious change is reported.
 fn fill_attributes(
     attrs: &FSItemAttributes,
     is_dir: bool,
     size: u64,
+    modified: Option<std::time::SystemTime>,
     item_id: FSItemID,
     parent_id: FSItemID,
 ) {
@@ -613,19 +629,26 @@ fn fill_attributes(
     attrs.setAllocSize(size);
     attrs.setFileID(item_id);
     attrs.setParentID(parent_id);
-    let now = now_timespec();
-    attrs.setAccessTime(now);
-    attrs.setModifyTime(now);
-    attrs.setChangeTime(now);
-    attrs.setBirthTime(now);
+    let ts = timespec_of(modified.unwrap_or_else(stable_fallback_time));
+    attrs.setAccessTime(ts);
+    attrs.setModifyTime(ts);
+    attrs.setChangeTime(ts);
+    attrs.setBirthTime(ts);
 }
 
-/// The current wall-clock time as a `Timespec`, or the Unix epoch if the clock is
-/// unavailable (keeps this panic-free).
-fn now_timespec() -> Timespec {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+/// A single wall-clock instant captured once per process, used as the timestamp
+/// for items the backend gives no time for. Captured lazily and cached so it never
+/// advances between calls (an advancing mtime is exactly what triggers the editor
+/// "changed since reading it" warning).
+fn stable_fallback_time() -> std::time::SystemTime {
+    static FALLBACK: OnceLock<std::time::SystemTime> = OnceLock::new();
+    *FALLBACK.get_or_init(std::time::SystemTime::now)
+}
+
+/// Convert a `SystemTime` to FSKit's `Timespec`, clamping pre-epoch times to the
+/// epoch (keeps this panic-free).
+fn timespec_of(t: std::time::SystemTime) -> Timespec {
+    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     Timespec {
         tv_sec: d.as_secs() as i64,
         tv_nsec: d.subsec_nanos() as i64,

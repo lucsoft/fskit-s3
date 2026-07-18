@@ -300,6 +300,14 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   a `timespec` by value needs an `Encode` impl matching `{timespec=qq}` (both
   fields `long`→`q` on 64-bit); a wrong encoding panics the objc2 msg_send in a
   debug build.
+- **The reported `mtime` MUST be stable across `getAttributes` calls.** Reporting
+  `SystemTime::now()` per call makes the modify time advance between an editor
+  opening a file and saving it, so vim/etc. abort a write with *"WARNING: The file
+  has been changed since reading it!!!"* (and `make`/`rsync` see phantom changes).
+  So `fill_attributes` uses the object's real `last_modified` (S3 provides it;
+  `backend::meta_modified` maps it onto `Entry.modified`) and, when the backend has
+  no time (directories/prefixes, the in-memory demo), a single process-stable
+  instant — never `now()`.
 - **The volume must implement `maximumFileSizeInBits` (or `maximumFileSize`)**:
   it's `@optional` in `FSVolumePathConfOperations` but required at runtime —
   otherwise `getMaxFileSizeInBits: … One of them must be implemented`.

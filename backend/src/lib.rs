@@ -83,6 +83,18 @@ fn map_err(e: opendal::Error) -> StorageError {
     }
 }
 
+/// The object's last-modified time as a `SystemTime`, if the service reports one
+/// (S3 always does). A *stable* mtime matters: the ext maps it onto the FSKit
+/// modify timestamp, and editors (vim's "changed since reading it!!!") warn when
+/// an mtime advances between opening and saving — which it did when we reported
+/// `now()`. Converted via the inherent chrono accessors so no `chrono` dep is
+/// needed; a pre-epoch time (never real for an object store) is dropped.
+fn meta_modified(meta: &opendal::Metadata) -> Option<std::time::SystemTime> {
+    let dt = meta.last_modified()?;
+    let secs = u64::try_from(dt.timestamp()).ok()?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::new(secs, dt.timestamp_subsec_nanos()))
+}
+
 impl OpenDalBackend {
     /// Copy one object, server-side when the service supports it (S3 does),
     /// falling back to a client-side read+write for services that don't (so
@@ -126,7 +138,11 @@ impl StorageBackend for OpenDalBackend {
             let meta = entry.metadata();
             out.push(match meta.mode() {
                 EntryMode::DIR => Entry::dir(name),
-                _ => Entry::file(name, meta.content_length()),
+                _ => {
+                    let mut e = Entry::file(name, meta.content_length());
+                    e.modified = meta_modified(meta);
+                    e
+                }
             });
         }
 
@@ -148,7 +164,9 @@ impl StorageBackend for OpenDalBackend {
 
         match self.op.stat(&file_key).await {
             Ok(meta) if meta.mode() == EntryMode::FILE => {
-                return Ok(Entry::file(name, meta.content_length()));
+                let mut e = Entry::file(name, meta.content_length());
+                e.modified = meta_modified(&meta);
+                return Ok(e);
             }
             Ok(_) => return Ok(Entry::dir(name)), // stat resolved it as a directory
             Err(e) if e.kind() == ErrorKind::NotFound => {} // maybe a prefix; check below
@@ -410,6 +428,37 @@ mod tests {
         assert!(matches!(b.stat("/nope").await, Err(StorageError::NotFound)));
     }
 
+    #[test]
+    fn meta_modified_converts_and_clamps() {
+        use opendal::{EntryMode, Metadata};
+        // A real last-modified time round-trips to the expected SystemTime; the
+        // ext maps this onto a *stable* FSKit mtime (fixes the editor "changed
+        // since reading it" warning that a per-call `now()` caused).
+        let dt = chrono::DateTime::from_timestamp(1_700_000_123, 456).unwrap();
+        let meta = Metadata::new(EntryMode::FILE).with_last_modified(dt);
+        let expected = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_123, 456);
+        assert_eq!(meta_modified(&meta), Some(expected));
+
+        // No time reported (OpenDAL's memory service, dir prefixes) => None, so
+        // the ext falls back to its process-stable instant.
+        assert_eq!(meta_modified(&Metadata::new(EntryMode::FILE)), None);
+
+        // A pre-epoch time (never real for an object store) is dropped, not panicked.
+        let pre = chrono::DateTime::from_timestamp(-5, 0).unwrap();
+        assert_eq!(
+            meta_modified(&Metadata::new(EntryMode::FILE).with_last_modified(pre)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_service_reports_no_modified_time() {
+        // Documents why the ext needs a fallback: OpenDAL's in-memory service (the
+        // demo mount) carries no last-modified, so `Entry.modified` is None there.
+        let b = sample().await;
+        assert!(b.stat("/readme.txt").await.unwrap().modified.is_none());
+    }
+
     #[tokio::test]
     async fn ranged_reads() {
         let b = sample().await;
@@ -544,7 +593,13 @@ mod tests {
         // compose seeds test-bucket/hello.txt = "hello from rustfs\n".
         let root = backend.list("/").await.expect("list root");
         assert!(root.iter().any(|e| e.name == "hello.txt"), "root: {root:?}");
-        assert_eq!(backend.stat("/hello.txt").await.expect("stat").size, 18);
+        let hello = backend.stat("/hello.txt").await.expect("stat");
+        assert_eq!(hello.size, 18);
+        // Real S3 reports a last-modified time; the ext maps it to a stable mtime.
+        assert!(
+            hello.modified.is_some(),
+            "S3 stat should carry a modified time"
+        );
         assert_eq!(
             backend.read("/hello.txt", 0, 1024).await.expect("read"),
             b"hello from rustfs\n"
