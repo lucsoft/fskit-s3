@@ -35,10 +35,8 @@ There's no bespoke CLI: a connection is just the system `mount` tool with the
 config passed as `-o` options, so you can also do it by hand.
 
 ```sh
-# -F: the filesystem is an FSKit module   -t fskit-s3: which module
-# (macOS `mount` is BSD-style — these flags have no --long-form spelling)
-# The path is repeated: mount needs a resource arg, but its contents are never
-# read (the backend comes from -o), so the mount point serves as its own resource.
+# -F = FSKit module, -t = which one. Path repeated on purpose: mount wants a
+# resource arg but never reads it, so the mount point stands in for it.
 
 # Secret inline — no setup, but insecure (visible in `ps`/`mount`):
 mount -F -t fskit-s3 \
