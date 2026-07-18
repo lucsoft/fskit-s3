@@ -261,6 +261,11 @@ pub fn push_button(mtm: MainThreadMarker, frame: NSRect, title: &str) -> Retaine
     b
 }
 
+/// Make a button the window's default (primary): tinted, and triggered by Return.
+pub fn set_default_button(button: &NSButton) {
+    button.setKeyEquivalent(&NSString::from_str("\r"));
+}
+
 /// Read a text field's current string.
 pub fn field_string(field: &NSTextField) -> String {
     field.stringValue().to_string()
@@ -290,6 +295,8 @@ pub fn pin_bottom(view: &NSView) {
 
 /// Resize a window so its content area is `w × h`, keeping the **top** edge fixed
 /// (it grows/shrinks downward). Subviews reposition per their autoresizing masks.
+/// Animates (the standard macOS resize) only when the window is already on screen,
+/// so the initial pre-`show` sizing is instant.
 pub fn set_window_content_size(window: &NSWindow, w: f64, h: f64) {
     let frame_size = window.frameRectForContentRect(rect(0.0, 0.0, w, h)).size;
     let old = window.frame();
@@ -298,5 +305,5 @@ pub fn set_window_content_size(window: &NSWindow, w: f64, h: f64) {
         NSPoint::new(old.origin.x, top - frame_size.height),
         frame_size,
     );
-    window.setFrame_display(new_frame, true);
+    window.setFrame_display_animate(new_frame, true, window.isVisible());
 }

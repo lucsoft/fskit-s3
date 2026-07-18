@@ -159,7 +159,7 @@ const WINDOW_H_MEMORY: f64 = 240.0;
 /// for the tall (S3) height; `update_visibility` shrinks to the memory height for
 /// the default In-memory selection before the window is shown.
 pub fn open(mtm: MainThreadMarker) {
-    let window = appkit::make_window(mtm, WINDOW_W, WINDOW_H_S3, "Add mount");
+    let window = appkit::make_window(mtm, WINDOW_W, WINDOW_H_S3, "New Connection");
     let Some(content) = appkit::content_view(&window) else {
         return;
     };
@@ -241,6 +241,7 @@ pub fn open(mtm: MainThreadMarker) {
     let cancel = appkit::push_button(mtm, appkit::rect(150.0, 14.0, 100.0, 32.0), "Cancel");
     add_bottom(&cancel);
     let save = appkit::push_button(mtm, appkit::rect(256.0, 14.0, 104.0, 32.0), "Test & Save");
+    appkit::set_default_button(&save); // primary button (tinted, triggered by Return)
     add_bottom(&save);
 
     let controller = AddWindowController::new(

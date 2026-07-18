@@ -147,7 +147,7 @@ impl Controller {
         // Add a new connection.
         menu.addItem(&appkit::menu_item(
             mtm,
-            "Add mount…",
+            "New Connection…",
             Some(sel!(addMount:)),
             Some(target),
             None,
