@@ -1,158 +1,93 @@
-//! FSKit extension glue — **skeleton, needs full Xcode to build/run**.
+//! FSKit extension logic, in Rust.
 //!
-//! This crate is where Rust meets FSKit. FSKit is a plain Objective-C framework
-//! (verified: `FSUnaryFileSystem.h` etc. ship real ObjC headers, no
-//! `.swiftinterface`), so it is driven from Rust with `objc2` exactly the way the
-//! sibling `wayland-macos` project drives AppKit — `extern_class!` to reference
-//! FSKit's classes, `define_class!` to subclass them, `objc2::rc::Retained` for
-//! ownership, `block2` for the reply handlers.
+//! Defines the `FSUnaryFileSystem` subclass (and, as they land, the `FSVolume`
+//! and `FSItem` subclasses) via `objc2`, delegating every operation to a
+//! [`StorageBackend`](fskit_s3_core::StorageBackend). Built as a `staticlib` and
+//! linked into an Xcode-managed `.appex`; a tiny ObjC stub there calls
+//! [`fskit_s3_register`] from `+load` so these Rust-defined classes are
+//! registered before FSKit looks up the principal class by name.
 //!
-//! ## Async bridging
-//!
-//! The extension owns a multi-threaded tokio runtime. FSKit hands each operation
-//! a reply block; the handler `Retained`s that block, `runtime.spawn`s the
-//! `StorageBackend` future, and invokes the block from the task on completion.
-//! The FSKit queue thread is never parked on network I/O, so many reads (Finder
-//! previews, parallel copies) proceed concurrently.
-//!
-//! ## Configuration
-//!
-//! Bucket/endpoint/credentials are read from the **macOS Keychain** when the
-//! volume loads (`loadResource:`), keyed by the resource identity — no plaintext
-//! secrets on disk, and it fits the app-extension sandbox. Until that path
-//! exists, [`VolumeState::demo`] mounts a credential-free in-memory volume.
-//!
-//! ## What FSKit asks of us
-//!
-//! A "unary" file system (one volume per resource, which is our model — one
-//! bucket = one volume) is implemented by:
-//!
-//! 1. An [`FSUnaryFileSystem`] subclass conforming to `FSUnaryFileSystemOperations`
-//!    — `probeResource:` (say whether we recognize a resource) and
-//!    `loadResource:options:replyHandler:` (return an `FSVolume` for it).
-//! 2. An `FSVolume` subclass conforming to `FSVolumeOperations` (+
-//!    `FSVolumePathConfOperations`, which it inherits) for lookup/enumerate/attrs,
-//!    and `FSVolumeReadWriteOperations` for `read:`. Each of these maps 1:1 onto a
-//!    [`StorageBackend`] call:
-//!
-//!    | FSKit volume op                        | `StorageBackend` |
-//!    |----------------------------------------|------------------|
-//!    | `enumerateDirectory:…`                 | `list`           |
-//!    | `lookupItemNamed:inDirectory:…`        | `stat`           |
-//!    | `getAttributes:ofItem:…`               | `stat`           |
-//!    | `readFromFile:…offset:length:…`        | `read`           |
-//!
-//! 3. `FSItem` subclasses (or one generic item carrying the absolute path +
-//!    kind) that we hand back to FSKit and it hands back to us on later calls.
-//!
-//! The registration is via the app-extension `Info.plist` (`NSExtension` /
-//! FSKit's `FSModuleIdentity`) pointing at our principal class — see
-//! `../bundle/`. There is no `main()`; `fskitd` instantiates the principal class.
-//!
-//! ## Why this isn't wired into the workspace build yet
-//!
-//! The bindings below are the real shape but incomplete, and the crate only
-//! yields something *loadable* once assembled into a codesigned `.appex` (full
-//! Xcode + a signing identity). The value already delivered and tested lives
-//! under it: `fskit-s3-core` (the seam) and `fskit-s3-backend-s3` (S3 + SigV4).
-//!
-//! The remaining work is mechanical but must be iterated against a running
-//! `fskitd`: finish the `extern_class!`/`define_class!` blocks, translate
-//! `StorageError` → `FSKitError`/errno, and map `FSItem` identity to paths.
+//! Status: milestone 1 — bindings + the `FSUnaryFileSystem` subclass compile and
+//! register. The volume operations (enumerate/lookup/read) follow.
 
-#![allow(dead_code)]
+#![allow(non_snake_case)]
 
-use std::sync::Arc;
+mod sys;
 
-use fskit_s3_core::StorageBackend;
+use std::ptr;
 
-/// The backend a mounted volume reads from. Chosen at load time from the
-/// resource FSKit hands us (bucket/endpoint/credentials via the mount options or
-/// a keychain item); falls back to the in-memory demo backend so the extension
-/// can be brought up before S3 config exists.
-pub struct VolumeState {
-    pub backend: Arc<dyn StorageBackend>,
-}
+use block2::DynBlock;
+use objc2::rc::Retained;
+use objc2::runtime::NSObjectProtocol;
+use objc2::{define_class, AllocAnyThread, ClassType};
+use objc2_foundation::{NSError, NSString, NSUUID};
 
-impl VolumeState {
-    /// Demo volume: a couple of in-memory objects, no credentials required.
-    pub fn demo() -> Self {
-        use fskit_s3_core::mem::InMemoryBackend;
-        let mut b = InMemoryBackend::new();
-        b.insert("readme.txt", b"mounted by fskit-s3\n".to_vec())
-            .insert("photos/cover.png", vec![0u8; 32]);
-        VolumeState { backend: Arc::new(b) }
+use sys::{
+    FSContainerIdentifier, FSFileName, FSProbeResult, FSResource, FSTaskOptions, FSUnaryFileSystem,
+    FSUnaryFileSystemOperations, FSVolume, FSVolumeIdentifier,
+};
+
+define_class!(
+    // Our delegate object: a concrete `FSUnaryFileSystem`. FSKit instantiates
+    // this (by the name below) as the extension's principal class.
+    #[unsafe(super(FSUnaryFileSystem))]
+    #[name = "FSKitS3FileSystem"]
+    pub struct FileSystem;
+
+    unsafe impl NSObjectProtocol for FileSystem {}
+
+    unsafe impl FSUnaryFileSystemOperations for FileSystem {
+        #[unsafe(method(probeResource:replyHandler:))]
+        fn probe(
+            &self,
+            _resource: &FSResource,
+            reply: &DynBlock<dyn Fn(*mut FSProbeResult, *mut NSError)>,
+        ) {
+            // We accept any resource (there's no on-disk format to recognize).
+            let container = {
+                let uuid = NSUUID::new();
+                FSContainerIdentifier::initWithUUID(FSContainerIdentifier::alloc(), &uuid)
+            };
+            let name = NSString::from_str("fskit-s3");
+            let result = FSProbeResult::usable(&name, &container);
+            reply.call((Retained::as_ptr(&result) as *mut _, ptr::null_mut()));
+        }
+
+        #[unsafe(method(loadResource:options:replyHandler:))]
+        fn load(
+            &self,
+            _resource: &FSResource,
+            _options: &FSTaskOptions,
+            reply: &DynBlock<dyn Fn(*mut FSVolume, *mut NSError)>,
+        ) {
+            // Milestone 1: return a bare volume to prove the load path. The real
+            // FSVolume subclass (with enumerate/lookup/read) replaces this next.
+            let volume = {
+                let uuid = NSUUID::new();
+                let vid = FSVolumeIdentifier::initWithUUID(FSVolumeIdentifier::alloc(), &uuid);
+                let name = FSFileName::nameWithString(&NSString::from_str("fskit-s3"));
+                FSVolume::initWithVolumeID_volumeName(FSVolume::alloc(), &vid, &name)
+            };
+            reply.call((Retained::as_ptr(&volume) as *mut _, ptr::null_mut()));
+        }
+
+        #[unsafe(method(unloadResource:options:replyHandler:))]
+        fn unload(
+            &self,
+            _resource: &FSResource,
+            _options: &FSTaskOptions,
+            reply: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            reply.call((ptr::null_mut(),));
+        }
     }
-}
+);
 
-// ---------------------------------------------------------------------------
-// FSKit bindings sketch. Uncomment + complete against the installed FSKit SDK.
-// The pattern mirrors wayland-macos/src/mac.rs (define_class!, msg_send, blocks).
-// ---------------------------------------------------------------------------
-//
-// use objc2::rc::Retained;
-// use objc2::runtime::NSObject;
-// use objc2::{define_class, extern_class, msg_send, ClassType, DefinedClass};
-// use objc2_foundation::{NSArray, NSError, NSString};
-//
-// extern_class!(
-//     // #[unsafe(super(NSObject))] — FSUnaryFileSystem : NSObject <FSFileSystemBase>
-//     #[unsafe(super(NSObject))]
-//     #[name = "FSUnaryFileSystem"]
-//     pub struct FSUnaryFileSystem;
-// );
-//
-// define_class!(
-//     #[unsafe(super(FSUnaryFileSystem))]
-//     #[name = "S3FileSystem"]
-//     #[ivars = VolumeState]                 // our Rust state lives on the ObjC instance
-//     pub struct S3FileSystem;
-//
-//     // impl FSUnaryFileSystemOperations:
-//     //   - probeResource:replyHandler:   → recognize our resource kind
-//     //   - loadResource:options:replyHandler: → build + return the FSVolume
-//     unsafe impl S3FileSystem {
-//         // #[unsafe(method(...))] wrappers calling into VolumeState/backend.
-//     }
-// );
-//
-// Volume ops (FSVolumeOperations + FSVolumeReadWriteOperations) each translate a
-// path/FSItem into a backend call and package the result (or a mapped errno)
-// into FSKit's reply block. `map_err` below is the single translation point.
-
-/// Translate a backend error into a POSIX errno for FSKit's reply handlers.
-pub fn errno_for(err: &fskit_s3_core::StorageError) -> i32 {
-    use fskit_s3_core::StorageError::*;
-    match err {
-        NotFound => libc_enoent(),
-        NotADirectory => 20,  // ENOTDIR
-        NotAFile => 21,       // EISDIR
-        InvalidPath(_) => 22, // EINVAL
-        Backend(_) => 5,      // EIO
-    }
-}
-
-const fn libc_enoent() -> i32 {
-    2 // ENOENT
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn demo_backend_is_mountable_shape() {
-        let v = VolumeState::demo();
-        let root = v.backend.list("/").await.unwrap();
-        let names: Vec<_> = root.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["photos", "readme.txt"]);
-        assert_eq!(v.backend.read("/readme.txt", 0, 4).await.unwrap(), b"moun");
-    }
-
-    #[test]
-    fn error_mapping() {
-        use fskit_s3_core::StorageError;
-        assert_eq!(errno_for(&StorageError::NotFound), 2);
-        assert_eq!(errno_for(&StorageError::NotADirectory), 20);
-    }
+/// Force-register the Rust-defined FSKit classes with the Objective-C runtime.
+///
+/// Called from the extension bundle's ObjC `+load` stub so the classes exist by
+/// the time FSKit resolves the principal class name from `Info.plist`. Idempotent.
+#[no_mangle]
+pub extern "C" fn fskit_s3_register() {
+    let _ = FileSystem::class();
 }

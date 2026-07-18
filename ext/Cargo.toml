@@ -4,24 +4,26 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
-# The FSKit extension binary: an ObjC `FSUnaryFileSystem` subclass (defined from
-# Rust via objc2) that delegates every list/stat/read to a `StorageBackend`.
-# Builds into the Mach-O that lives inside the `.appex` bundle (see ../bundle).
-#
-# STATUS: skeleton. The objc2 bindings for FSKit are hand-written here (no
-# published `objc2-fs-kit` crate yet) and the crate is NOT in the workspace
-# `members` yet — it links the FSKit framework and only produces something
-# loadable once assembled + codesigned as an app extension (full Xcode). The
-# core + backend-s3 crates it depends on are already complete and tested.
+# The FSKit extension logic, in Rust. Defines the FSUnaryFileSystem / FSVolume /
+# FSItem subclasses via objc2 and delegates every operation to a StorageBackend.
+# Built as a `staticlib` and linked into an Xcode-managed .appex (which handles
+# the extension-point plumbing, entitlements, and signing). A tiny ObjC stub in
+# that target calls `fskit_s3_register` from +load so the Rust-defined classes
+# are registered before FSKit looks up the principal class.
 [lib]
-crate-type = ["cdylib"]
+name = "fskit_s3_ext"
+crate-type = ["staticlib"]
 
 [dependencies]
 fskit-s3-core = { workspace = true, features = ["mem"] }
 fskit-s3-backend = { workspace = true }
-# Async runtime lives in the extension: each FSKit op spawns a task and fires the
-# reply block on completion (see module docs).
 tokio = { version = "1", features = ["rt-multi-thread"] }
 objc2 = "0.6"
-objc2-foundation = "0.3"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSData",
+    "NSError",
+    "NSUUID",
+] }
 block2 = "0.6"
+libc = "0.2"
