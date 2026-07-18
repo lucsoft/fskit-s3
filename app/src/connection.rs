@@ -169,6 +169,12 @@ impl Connection {
         if secret.is_empty() {
             return Err("Secret Access Key is required for an S3 connection.".to_string());
         }
+        // OpenDAL requires a region; without one the backend fails to build with a
+        // terse "ConfigInvalid". Real AWS needs the correct region; most S3-compatible
+        // stores (MinIO, RustFS, R2) ignore the value but still need it non-empty.
+        if region.is_empty() {
+            return Err("Region is required for S3 (e.g. us-east-1).".to_string());
+        }
         if !endpoint.is_empty() {
             validate_endpoint(endpoint)?;
         }
@@ -419,6 +425,7 @@ mod tests {
         assert!(missing(|f| f.bucket = String::new()).contains("Bucket"));
         assert!(missing(|f| f.access_key_id = String::new()).contains("Access Key"));
         assert!(missing(|f| f.secret = String::new()).contains("Secret"));
+        assert!(missing(|f| f.region = String::new()).contains("Region"));
     }
 
     #[test]
