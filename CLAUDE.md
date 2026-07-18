@@ -97,6 +97,9 @@ prefix).
 - **`ext/src/lib.rs`** — FSKit glue (**skeleton**): the `objc2`
   `FSUnaryFileSystem` subclass + tokio bridge + `StorageError`→errno mapping.
   Not yet in the workspace build.
+- **`menubar/src/`** — `fskit-s3-menubar`, a macOS status-bar app (`objc2` +
+  AppKit) that lists and unmounts fskit-s3 volumes. `mounts.rs` is pure/tested;
+  `appkit.rs` is the *only* module that writes `unsafe`, behind checked helpers.
 - **`bundle/`** — `.appex`/host-app `Info.plist`, entitlements, and a Makefile
   that assembles + codesigns the module. **Templates** — reconcile against
   Xcode's FSKit target.

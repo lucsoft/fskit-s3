@@ -1,0 +1,19 @@
+[package]
+name = "fskit-s3-menubar"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# A macOS status-bar (menu bar) app to list and unmount fskit-s3 volumes. AppKit
+# is driven from Rust via objc2; every FFI call lives behind a checked safe
+# helper in `appkit.rs` so the rest of the code never writes `unsafe`.
+[[bin]]
+name = "fskit-s3-menubar"
+path = "src/main.rs"
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+# Default features enable the AppKit classes we use (NSApplication, NSStatusItem,
+# NSMenu, …); picking them individually is brittle across point releases.
+objc2-app-kit = "0.3"

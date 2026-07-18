@@ -3,7 +3,7 @@ resolver = "2"
 # ext is added back once the FSKit bindings compile (it links Apple frameworks
 # and only yields a loadable module as a codesigned .appex). core + backend build
 # and test on any host.
-members = ["core", "backend"]
+members = ["core", "backend", "menubar"]
 
 [workspace.package]
 edition = "2021"
