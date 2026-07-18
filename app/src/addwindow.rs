@@ -17,7 +17,9 @@ use std::cell::RefCell;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSButton, NSPopUpButton, NSSecureTextField, NSTextField, NSView, NSWindow};
+use objc2_app_kit::{
+    NSBox, NSButton, NSPopUpButton, NSSecureTextField, NSSwitch, NSTextField, NSView, NSWindow,
+};
 
 use crate::appkit;
 use crate::connection::{Connection, ConnectionKind, FormInput, Registry};
@@ -33,15 +35,15 @@ struct AddIvars {
     window: Retained<NSWindow>,
     type_popup: Retained<NSPopUpButton>,
     name: Retained<NSTextField>,
-    s3_box: Retained<NSView>,
+    s3_box: Retained<NSBox>,
     endpoint: Retained<NSTextField>,
     bucket: Retained<NSTextField>,
     region: Retained<NSTextField>,
     akid: Retained<NSTextField>,
     secret: Retained<NSSecureTextField>,
     token: Retained<NSTextField>,
-    save_keychain: Retained<NSButton>,
-    mount_launch: Retained<NSButton>,
+    save_keychain: Retained<NSSwitch>,
+    mount_launch: Retained<NSSwitch>,
     status: Retained<NSTextField>,
     /// The name of the connection being edited, or `None` when creating a new one.
     /// In edit mode the name field is locked to this, so it doubles as the registry
@@ -112,8 +114,8 @@ impl AddWindowController {
             access_key_id: appkit::field_string(&iv.akid),
             secret: appkit::field_string(&iv.secret),
             session_token: appkit::field_string(&iv.token),
-            save_secret_to_keychain: appkit::checkbox_on(&iv.save_keychain),
-            mount_on_launch: appkit::checkbox_on(&iv.mount_launch),
+            save_secret_to_keychain: appkit::switch_on(&iv.save_keychain),
+            mount_on_launch: appkit::switch_on(&iv.mount_launch),
         };
         // Keep what the live check + Keychain need after `from_form` consumes `input`.
         let secret = input.secret.clone();
@@ -219,12 +221,44 @@ impl AddWindowController {
     }
 }
 
-/// Window content width, and the two heights the form toggles between (S3 fields
-/// shown vs. hidden). The bottom group (checkbox/status/buttons) is pinned to the
-/// bottom, so shrinking the window collapses the empty middle.
-const WINDOW_W: f64 = 380.0;
-const WINDOW_H_S3: f64 = 440.0;
-const WINDOW_H_MEMORY: f64 = 240.0;
+/// Grouped-section geometry (an iOS-Settings-style card of stacked rows).
+/// Cards are inset [`MARGIN`] from the window edges; rows are [`ROW_H`] tall with
+/// the label at [`ROW_INSET`] from the left and a right-aligned value column.
+const WINDOW_W: f64 = 400.0;
+const MARGIN: f64 = 20.0;
+const GROUP_W: f64 = WINDOW_W - 2.0 * MARGIN;
+const GAP: f64 = 16.0;
+const ROW_H: f64 = 40.0;
+const ROW_INSET: f64 = 16.0;
+const LABEL_W: f64 = 120.0;
+const VALUE_X: f64 = ROW_INSET + LABEL_W + 8.0;
+const VALUE_W: f64 = GROUP_W - VALUE_X - ROW_INSET;
+const STATUS_H: f64 = 40.0;
+const BUTTON_H: f64 = 32.0;
+/// Rows in each section: identity (Name, Type); S3 (Endpoint, Bucket, Region,
+/// Access Key ID, Secret, Session token, Save to Keychain); options (Mount).
+const ID_ROWS: usize = 2;
+const S3_ROWS: usize = 7;
+const OPT_ROWS: usize = 1;
+const ID_H: f64 = ID_ROWS as f64 * ROW_H;
+const S3_H: f64 = S3_ROWS as f64 * ROW_H;
+const OPT_H: f64 = OPT_ROWS as f64 * ROW_H;
+
+// Card / control y-origins (bottom-left) at the tall S3 height. Identity + S3 pin
+// to the top; the options card, status line, and buttons pin to the bottom above
+// the buttons, so hiding the S3 card and shrinking the window collapses the middle.
+const BUTTONS_Y: f64 = MARGIN;
+// A full-width divider separating the form content from the action-button row.
+const SEP_Y: f64 = BUTTONS_Y + BUTTON_H + 12.0;
+const STATUS_Y: f64 = SEP_Y + 12.0;
+const OPT_Y: f64 = STATUS_Y + STATUS_H + GAP;
+// The two heights the form toggles between: the difference is exactly the S3 card
+// plus one inter-section gap, so shrinking to the memory height removes the S3 card
+// cleanly (see `update_visibility`).
+const WINDOW_H_S3: f64 = OPT_Y + OPT_H + GAP + S3_H + GAP + ID_H + MARGIN;
+const WINDOW_H_MEMORY: f64 = WINDOW_H_S3 - S3_H - GAP;
+const ID_Y: f64 = WINDOW_H_S3 - MARGIN - ID_H;
+const S3_Y: f64 = ID_Y - GAP - S3_H;
 
 /// Open the form to create a new connection.
 pub fn open(mtm: MainThreadMarker) {
@@ -289,7 +323,9 @@ fn open_form(mtm: MainThreadMarker, existing: Option<Connection>) {
     let Some(content) = appkit::content_view(&window) else {
         return;
     };
-    // Top group tracks the top edge; bottom group tracks the bottom edge.
+    // The identity + S3 cards track the top edge; the options card, status, and
+    // buttons track the bottom edge, so hiding the S3 card and shrinking the window
+    // (see `update_visibility`) collapses the gap cleanly.
     let add_top = |v: &NSView| {
         appkit::pin_top(v);
         appkit::add_subview(&content, v);
@@ -299,86 +335,192 @@ fn open_form(mtm: MainThreadMarker, existing: Option<Connection>) {
         appkit::add_subview(&content, v);
     };
 
+    // A value row inside a grouped card `cv` of `rows` rows: adds the left label
+    // (and a hairline above every row but the first) and returns the frame the
+    // caller drops the right-aligned value control into. Coordinates are local to
+    // the card's content view (bottom-left origin, height = rows * ROW_H).
+    let row = |cv: &NSView, rows: usize, idx: usize, text: &str| -> objc2_foundation::NSRect {
+        let card_h = rows as f64 * ROW_H;
+        let top = card_h - idx as f64 * ROW_H;
+        let center = top - ROW_H / 2.0;
+        appkit::add_subview(
+            cv,
+            &appkit::label(
+                mtm,
+                appkit::rect(ROW_INSET, center - 10.0, LABEL_W, 20.0),
+                text,
+            ),
+        );
+        if idx > 0 {
+            appkit::add_subview(
+                cv,
+                &appkit::hairline(
+                    mtm,
+                    appkit::rect(ROW_INSET, top - 0.5, GROUP_W - ROW_INSET, 1.0),
+                ),
+            );
+        }
+        appkit::rect(VALUE_X, center - 11.0, VALUE_W, 22.0)
+    };
+
+    // A toggle row: a wide label on the left and a switch on the right. Returns the
+    // switch so the caller can stash it (its state is read on save).
+    let toggle_row = |cv: &NSView, rows: usize, idx: usize, text: &str, on: bool| {
+        const SWITCH_W: f64 = 38.0;
+        let card_h = rows as f64 * ROW_H;
+        let top = card_h - idx as f64 * ROW_H;
+        let center = top - ROW_H / 2.0;
+        let label_w = GROUP_W - ROW_INSET - SWITCH_W - 16.0;
+        appkit::add_subview(
+            cv,
+            &appkit::label(
+                mtm,
+                appkit::rect(ROW_INSET, center - 10.0, label_w, 20.0),
+                text,
+            ),
+        );
+        if idx > 0 {
+            appkit::add_subview(
+                cv,
+                &appkit::hairline(
+                    mtm,
+                    appkit::rect(ROW_INSET, top - 0.5, GROUP_W - ROW_INSET, 1.0),
+                ),
+            );
+        }
+        let s = appkit::make_switch(
+            mtm,
+            appkit::rect(
+                GROUP_W - ROW_INSET - SWITCH_W,
+                center - 10.5,
+                SWITCH_W,
+                21.0,
+            ),
+            on,
+        );
+        appkit::add_subview(cv, &s);
+        s
+    };
+
+    // --- Identity card (Name, Type) — pinned to the top. ---
+    let id_box = appkit::grouped_box(mtm, appkit::rect(MARGIN, ID_Y, GROUP_W, ID_H));
+    add_top(&id_box);
+    let Some(id_cv) = appkit::box_content(&id_box) else {
+        return;
+    };
     // Name (locked when editing — it's the registry key).
-    add_top(&appkit::label(
-        mtm,
-        appkit::rect(20.0, 400.0, 120.0, 20.0),
-        "Name",
-    ));
-    let name = appkit::text_field(mtm, appkit::rect(150.0, 398.0, 210.0, 22.0), &init_name);
+    let name = appkit::row_field(mtm, row(&id_cv, ID_ROWS, 0, "Name"), &init_name, "Required");
     if original_name.is_some() {
         appkit::set_editable(&name, false);
     }
-    add_top(&name);
-
+    appkit::add_subview(&id_cv, &name);
     // Type selector.
-    add_top(&appkit::label(
-        mtm,
-        appkit::rect(20.0, 368.0, 120.0, 20.0),
-        "Type",
-    ));
+    let type_rect = row(&id_cv, ID_ROWS, 1, "Type");
     let type_popup = appkit::popup(
         mtm,
-        appkit::rect(150.0, 364.0, 210.0, 26.0),
+        appkit::rect(
+            type_rect.origin.x,
+            type_rect.origin.y - 1.5,
+            type_rect.size.width,
+            25.0,
+        ),
         &["In-memory", "S3"],
     );
     appkit::select_popup_index(&type_popup, if is_s3_init { 1 } else { 0 });
-    add_top(&type_popup);
+    appkit::add_subview(&id_cv, &type_popup);
 
-    // S3 fields, grouped in a box so the whole group toggles + moves at once.
-    let s3_box = appkit::plain_view(mtm, appkit::rect(0.0, 150.0, 380.0, 205.0));
-    let field_row = |label_text: &str, rel_y: f64, initial: &str| -> Retained<NSTextField> {
-        appkit::add_subview(
-            &s3_box,
-            &appkit::label(
-                mtm,
-                appkit::rect(20.0, rel_y + 2.0, 120.0, 20.0),
-                label_text,
-            ),
-        );
-        let f = appkit::text_field(mtm, appkit::rect(150.0, rel_y, 210.0, 22.0), initial);
-        appkit::add_subview(&s3_box, &f);
-        f
-    };
-    let endpoint = field_row("Endpoint", 178.0, &init_endpoint);
-    let bucket = field_row("Bucket", 150.0, &init_bucket);
-    let region = field_row("Region", 122.0, &init_region);
-    let akid = field_row("Access Key ID", 94.0, &init_akid);
-    appkit::add_subview(
-        &s3_box,
-        &appkit::label(mtm, appkit::rect(20.0, 68.0, 120.0, 20.0), "Secret"),
-    );
-    let secret = appkit::secure_field(mtm, appkit::rect(150.0, 66.0, 210.0, 22.0));
-    appkit::set_string(&secret, &init_secret);
-    appkit::add_subview(&s3_box, &secret);
-    let token = field_row("Session token", 38.0, &init_token);
-    let save_keychain = appkit::checkbox(
-        mtm,
-        appkit::rect(150.0, 8.0, 210.0, 20.0),
-        "Save secret to Keychain",
-    );
-    appkit::set_checkbox_on(&save_keychain, init_save_keychain);
-    appkit::add_subview(&s3_box, &save_keychain);
+    // --- S3 card — pinned to the top under identity; toggled with the type. ---
+    let s3_box = appkit::grouped_box(mtm, appkit::rect(MARGIN, S3_Y, GROUP_W, S3_H));
     add_top(&s3_box);
-
-    // Always-visible options + status + buttons (pinned to the bottom edge).
-    let mount_launch = appkit::checkbox(
+    let Some(s3_cv) = appkit::box_content(&s3_box) else {
+        return;
+    };
+    let endpoint = appkit::row_field(
         mtm,
-        appkit::rect(150.0, 100.0, 210.0, 20.0),
-        "Mount when launching",
+        row(&s3_cv, S3_ROWS, 0, "Endpoint"),
+        &init_endpoint,
+        "https://s3.example.com",
     );
-    appkit::set_checkbox_on(&mount_launch, init_mount_launch);
-    add_bottom(&mount_launch);
-    let status = appkit::wrapping_label(mtm, appkit::rect(20.0, 56.0, 340.0, 44.0), "");
+    appkit::add_subview(&s3_cv, &endpoint);
+    let bucket = appkit::row_field(
+        mtm,
+        row(&s3_cv, S3_ROWS, 1, "Bucket"),
+        &init_bucket,
+        "Required",
+    );
+    appkit::add_subview(&s3_cv, &bucket);
+    let region = appkit::row_field(mtm, row(&s3_cv, S3_ROWS, 2, "Region"), &init_region, "auto");
+    appkit::add_subview(&s3_cv, &region);
+    let akid = appkit::row_field(
+        mtm,
+        row(&s3_cv, S3_ROWS, 3, "Access Key ID"),
+        &init_akid,
+        "Required",
+    );
+    appkit::add_subview(&s3_cv, &akid);
+    let secret = appkit::row_secure_field(
+        mtm,
+        row(&s3_cv, S3_ROWS, 4, "Secret"),
+        &init_secret,
+        "Required",
+    );
+    appkit::add_subview(&s3_cv, &secret);
+    let token = appkit::row_field(
+        mtm,
+        row(&s3_cv, S3_ROWS, 5, "Session token"),
+        &init_token,
+        "Optional",
+    );
+    appkit::add_subview(&s3_cv, &token);
+    let save_keychain = toggle_row(
+        &s3_cv,
+        S3_ROWS,
+        6,
+        "Save secret to Keychain",
+        init_save_keychain,
+    );
+
+    // --- Options card (Mount when launching) — pinned to the bottom. ---
+    let opt_box = appkit::grouped_box(mtm, appkit::rect(MARGIN, OPT_Y, GROUP_W, OPT_H));
+    add_bottom(&opt_box);
+    let Some(opt_cv) = appkit::box_content(&opt_box) else {
+        return;
+    };
+    let mount_launch = toggle_row(
+        &opt_cv,
+        OPT_ROWS,
+        0,
+        "Mount when launching",
+        init_mount_launch,
+    );
+
+    // Status line + a full-width divider + buttons (pinned to the bottom edge).
+    let status = appkit::wrapping_label(mtm, appkit::rect(MARGIN, STATUS_Y, GROUP_W, STATUS_H), "");
     add_bottom(&status);
-    let cancel = appkit::push_button(mtm, appkit::rect(150.0, 14.0, 100.0, 32.0), "Cancel");
-    add_bottom(&cancel);
-    let save = appkit::push_button(mtm, appkit::rect(256.0, 14.0, 104.0, 32.0), "Test & Save");
+    add_bottom(&appkit::hairline(
+        mtm,
+        appkit::rect(0.0, SEP_Y, WINDOW_W, 1.0),
+    ));
+    let save = appkit::push_button(
+        mtm,
+        appkit::rect(WINDOW_W - MARGIN - 120.0, BUTTONS_Y, 120.0, BUTTON_H),
+        "Test & Save",
+    );
     appkit::set_default_button(&save); // primary button (tinted, triggered by Return)
     add_bottom(&save);
+    let cancel = appkit::push_button(
+        mtm,
+        appkit::rect(WINDOW_W - MARGIN - 228.0, BUTTONS_Y, 100.0, BUTTON_H),
+        "Cancel",
+    );
+    add_bottom(&cancel);
     // Destructive Delete, only when editing an existing connection (left corner).
     let delete = original_name.is_some().then(|| {
-        let b = appkit::push_button(mtm, appkit::rect(20.0, 14.0, 100.0, 32.0), "Delete");
+        let b = appkit::push_button(
+            mtm,
+            appkit::rect(MARGIN, BUTTONS_Y, 100.0, BUTTON_H),
+            "Delete",
+        );
         appkit::set_button_destructive(&b);
         add_bottom(&b);
         b

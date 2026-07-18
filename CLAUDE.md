@@ -259,6 +259,21 @@ project models a *resource (unary)* filesystem, not a block-device one, so Photo
 support is a separate track: spike the block-device flavor + the capability gate
 before investing. Current target is the general bucket mount.
 
+## Change workflow
+
+Every code change follows the same loop — **never edit on `main` directly**:
+
+1. **Enter a worktree.** Start each change in its own git worktree (isolated
+   branch + checkout), so `main` stays untouched while work is in progress.
+2. **Complete the change.** Implement it fully and get it green: `cargo test`,
+   `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --all` must all
+   pass before the change is considered done.
+3. **Ask the user for approval.** Summarize what changed and wait for an explicit
+   go-ahead. Do **not** push unreviewed work.
+4. **Push to `main`.** Once approved, land the change on `main` (merge/fast-forward
+   the worktree branch, then push).
+5. **Leave the worktree.** Exit the worktree; it's removed once its work is merged.
+
 ## Conventions
 
 - Code, comments, commit messages in **English**.

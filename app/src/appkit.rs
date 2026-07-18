@@ -8,12 +8,13 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{sel, MainThreadMarker, MainThreadOnly};
+use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSButton, NSColor, NSControl, NSControlStateValueOff,
+    NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlStateValueOff,
     NSControlStateValueOn, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton,
-    NSSecureTextField, NSStatusItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSSecureTextField, NSStatusItem, NSSwitch, NSTextAlignment, NSTextField, NSTitlePosition,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -169,9 +170,38 @@ pub fn content_view(window: &NSWindow) -> Option<Retained<NSView>> {
     window.contentView()
 }
 
-/// A plain container view (used to group + toggle the S3 fields at once).
-pub fn plain_view(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSView> {
-    NSView::initWithFrame(NSView::alloc(mtm), frame)
+/// A rounded, filled "grouped" section — the iOS-Settings / macOS-System-Settings
+/// look: a single card that holds a stack of rows. Add rows to its content view
+/// ([`box_content`]); hide/show or move the whole card by acting on the box.
+pub fn grouped_box(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSBox> {
+    // SAFETY: `initWithFrame:` is NSView's designated initializer (inherited by
+    // NSBox); a fresh alloc and a valid frame rect are its only preconditions.
+    let b: Retained<NSBox> = unsafe { msg_send![NSBox::alloc(mtm), initWithFrame: frame] };
+    b.setBoxType(NSBoxType::Custom);
+    b.setTitlePosition(NSTitlePosition::NoTitle);
+    b.setBorderWidth(0.0);
+    b.setCornerRadius(10.0);
+    // A semantic content color so the card stays a touch elevated from the window
+    // background and adapts to light/dark automatically.
+    b.setFillColor(&NSColor::controlBackgroundColor());
+    // Zero margins so the content view fills the card and row frames are exact.
+    b.setContentViewMargins(NSSize::new(0.0, 0.0));
+    b
+}
+
+/// The content view of a [`grouped_box`] — the parent for its rows (origin at the
+/// card's bottom-left, sized to the card).
+pub fn box_content(b: &NSBox) -> Option<Retained<NSView>> {
+    b.contentView()
+}
+
+/// A hairline row separator (a horizontal `NSBox` line), used between the rows of
+/// a grouped section. Draws in the system separator color and adapts to the theme.
+pub fn hairline(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSBox> {
+    // SAFETY: same inherited `initWithFrame:` initializer as `grouped_box`.
+    let b: Retained<NSBox> = unsafe { msg_send![NSBox::alloc(mtm), initWithFrame: frame] };
+    b.setBoxType(NSBoxType::Separator);
+    b
 }
 
 /// Add a control as a subview of `parent`.
@@ -229,6 +259,41 @@ pub fn secure_field(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSSecureTe
     f
 }
 
+/// The value column of a grouped-section row: a borderless, right-aligned field
+/// that blends into the card's fill, with greyed `placeholder` text when empty.
+pub fn row_field(
+    mtm: MainThreadMarker,
+    frame: NSRect,
+    initial: &str,
+    placeholder: &str,
+) -> Retained<NSTextField> {
+    let f = text_field(mtm, frame, initial);
+    style_row_field(&f, placeholder);
+    f
+}
+
+/// The secure (bulleted) variant of [`row_field`] — the Secret row's value column.
+pub fn row_secure_field(
+    mtm: MainThreadMarker,
+    frame: NSRect,
+    initial: &str,
+    placeholder: &str,
+) -> Retained<NSSecureTextField> {
+    let f = secure_field(mtm, frame);
+    f.setStringValue(&NSString::from_str(initial));
+    style_row_field(&f, placeholder);
+    f
+}
+
+/// Shared styling for the grouped-row value fields (borderless, no background,
+/// right-aligned, placeholder). Takes `&NSTextField`; `NSSecureTextField` is one.
+fn style_row_field(f: &NSTextField, placeholder: &str) {
+    f.setBezeled(false);
+    f.setDrawsBackground(false);
+    f.setAlignment(NSTextAlignment::Right);
+    f.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+}
+
 /// A pop-up button pre-populated with `items`. Wire its action later with
 /// [`set_target_action`] once the target object exists.
 pub fn popup(mtm: MainThreadMarker, frame: NSRect, items: &[&str]) -> Retained<NSPopUpButton> {
@@ -281,14 +346,23 @@ pub fn checkbox_on(button: &NSButton) -> bool {
     button.state() == NSControlStateValueOn
 }
 
-/// Set a checkbox's checked state (used to pre-fill the form when editing).
-pub fn set_checkbox_on(button: &NSButton, on: bool) {
-    let state = if on {
+/// A modern toggle switch for a grouped-section row, pre-set to `on` (used for the
+/// "Save to Keychain" and "Mount when launching" rows).
+pub fn make_switch(mtm: MainThreadMarker, frame: NSRect, on: bool) -> Retained<NSSwitch> {
+    // SAFETY: `initWithFrame:` is NSView's designated initializer (inherited by
+    // NSSwitch); a fresh alloc and a valid frame rect are its only preconditions.
+    let s: Retained<NSSwitch> = unsafe { msg_send![NSSwitch::alloc(mtm), initWithFrame: frame] };
+    s.setState(if on {
         NSControlStateValueOn
     } else {
         NSControlStateValueOff
-    };
-    button.setState(state);
+    });
+    s
+}
+
+/// Whether a switch is on.
+pub fn switch_on(switch: &NSSwitch) -> bool {
+    switch.state() == NSControlStateValueOn
 }
 
 /// A push button. Wire its action later with [`set_target_action`].
