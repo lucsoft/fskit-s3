@@ -10,9 +10,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSButton, NSControl, NSControlStateValueOn, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSPopUpButton, NSSecureTextField, NSStatusItem, NSTextField,
-    NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSControl,
+    NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton, NSSecureTextField,
+    NSStatusItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -235,4 +235,29 @@ pub fn set_string(field: &NSTextField, text: &str) {
 /// Show or hide a control.
 pub fn set_hidden(view: &NSView, hidden: bool) {
     view.setHidden(hidden);
+}
+
+/// Pin a control to the top edge of its superview (fixed distance from the top;
+/// the space below flexes when the window resizes).
+pub fn pin_top(view: &NSView) {
+    view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+}
+
+/// Pin a control to the bottom edge of its superview (fixed distance from the
+/// bottom; the space above flexes).
+pub fn pin_bottom(view: &NSView) {
+    view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMaxYMargin);
+}
+
+/// Resize a window so its content area is `w × h`, keeping the **top** edge fixed
+/// (it grows/shrinks downward). Subviews reposition per their autoresizing masks.
+pub fn set_window_content_size(window: &NSWindow, w: f64, h: f64) {
+    let frame_size = window.frameRectForContentRect(rect(0.0, 0.0, w, h)).size;
+    let old = window.frame();
+    let top = old.origin.y + old.size.height;
+    let new_frame = NSRect::new(
+        NSPoint::new(old.origin.x, top - frame_size.height),
+        frame_size,
+    );
+    window.setFrame_display(new_frame, true);
 }

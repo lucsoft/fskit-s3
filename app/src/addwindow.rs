@@ -74,10 +74,14 @@ impl AddWindowController {
         unsafe { msg_send![super(this), init] }
     }
 
-    /// Show the S3 fields only when the S3 type is selected.
+    /// Show the S3 fields only for the S3 type, and shrink/grow the window height
+    /// to fit (the top group stays put; the bottom group + buttons follow).
     fn update_visibility(&self) {
-        let is_s3 = appkit::popup_index(&self.ivars().type_popup) == 1;
-        appkit::set_hidden(&self.ivars().s3_box, !is_s3);
+        let iv = self.ivars();
+        let is_s3 = appkit::popup_index(&iv.type_popup) == 1;
+        appkit::set_hidden(&iv.s3_box, !is_s3);
+        let height = if is_s3 { WINDOW_H_S3 } else { WINDOW_H_MEMORY };
+        appkit::set_window_content_size(&iv.window, WINDOW_W, height);
     }
 
     /// Validate (S3), persist the connection + secret, and close on success.
@@ -152,34 +156,54 @@ impl AddWindowController {
     }
 }
 
-/// Open the Add-mount window (replacing any previous one).
+/// Window content width, and the two heights the form toggles between (S3 fields
+/// shown vs. hidden). The bottom group (checkbox/status/buttons) is pinned to the
+/// bottom, so shrinking the window collapses the empty middle.
+const WINDOW_W: f64 = 380.0;
+const WINDOW_H_S3: f64 = 440.0;
+const WINDOW_H_MEMORY: f64 = 240.0;
+
+/// Open the Add-mount window (replacing any previous one). Controls are laid out
+/// for the tall (S3) height; `update_visibility` shrinks to the memory height for
+/// the default In-memory selection before the window is shown.
 pub fn open(mtm: MainThreadMarker) {
-    let window = appkit::make_window(mtm, 380.0, 440.0, "Add mount");
+    let window = appkit::make_window(mtm, WINDOW_W, WINDOW_H_S3, "Add mount");
     let Some(content) = appkit::content_view(&window) else {
         return;
     };
+    // Top group tracks the top edge; bottom group tracks the bottom edge.
+    let add_top = |v: &NSView| {
+        appkit::pin_top(v);
+        appkit::add_subview(&content, v);
+    };
+    let add_bottom = |v: &NSView| {
+        appkit::pin_bottom(v);
+        appkit::add_subview(&content, v);
+    };
 
     // Name.
-    appkit::add_subview(
-        &content,
-        &appkit::label(mtm, appkit::rect(20.0, 400.0, 120.0, 20.0), "Name"),
-    );
+    add_top(&appkit::label(
+        mtm,
+        appkit::rect(20.0, 400.0, 120.0, 20.0),
+        "Name",
+    ));
     let name = appkit::text_field(mtm, appkit::rect(150.0, 398.0, 210.0, 22.0), "");
-    appkit::add_subview(&content, &name);
+    add_top(&name);
 
     // Type selector.
-    appkit::add_subview(
-        &content,
-        &appkit::label(mtm, appkit::rect(20.0, 368.0, 120.0, 20.0), "Type"),
-    );
+    add_top(&appkit::label(
+        mtm,
+        appkit::rect(20.0, 368.0, 120.0, 20.0),
+        "Type",
+    ));
     let type_popup = appkit::popup(
         mtm,
         appkit::rect(150.0, 364.0, 210.0, 26.0),
         &["In-memory", "S3"],
     );
-    appkit::add_subview(&content, &type_popup);
+    add_top(&type_popup);
 
-    // S3 fields, grouped in a box so the whole group toggles at once.
+    // S3 fields, grouped in a box so the whole group toggles + moves at once.
     let s3_box = appkit::plain_view(mtm, appkit::rect(0.0, 150.0, 380.0, 205.0));
     let field_row = |label_text: &str, rel_y: f64| -> Retained<NSTextField> {
         appkit::add_subview(
@@ -211,21 +235,21 @@ pub fn open(mtm: MainThreadMarker) {
         "Save secret to Keychain",
     );
     appkit::add_subview(&s3_box, &save_keychain);
-    appkit::add_subview(&content, &s3_box);
+    add_top(&s3_box);
 
-    // Always-visible options + status + buttons.
+    // Always-visible options + status + buttons (pinned to the bottom edge).
     let mount_launch = appkit::checkbox(
         mtm,
         appkit::rect(150.0, 118.0, 210.0, 20.0),
         "Mount when launching",
     );
-    appkit::add_subview(&content, &mount_launch);
+    add_bottom(&mount_launch);
     let status = appkit::label(mtm, appkit::rect(20.0, 56.0, 340.0, 44.0), "");
-    appkit::add_subview(&content, &status);
+    add_bottom(&status);
     let cancel = appkit::push_button(mtm, appkit::rect(150.0, 14.0, 100.0, 32.0), "Cancel");
-    appkit::add_subview(&content, &cancel);
+    add_bottom(&cancel);
     let save = appkit::push_button(mtm, appkit::rect(256.0, 14.0, 104.0, 32.0), "Test & Save");
-    appkit::add_subview(&content, &save);
+    add_bottom(&save);
 
     let controller = AddWindowController::new(
         mtm,
