@@ -85,36 +85,35 @@ impl Connection {
         base_dir().join(&self.name)
     }
 
-    /// The `-o key=value` options handed to `mount` for this connection — its
-    /// non-secret config. Always carries an explicit `type` (`memory` | `s3`) so
-    /// the extension dispatches unambiguously and **errors** on a mount with no
-    /// `type` rather than silently serving the demo. For S3, `name` identifies the
-    /// connection (the extension's Keychain account); the demo needs no `name`. The
-    /// **secret** is never included; [`crate::mounts::mount`] appends `secret=…` for
-    /// the insecure path.
+    /// The **source path** handed to `mount` — the connection's config, made
+    /// self-describing so the extension resolves it at `loadResource` (where a bad
+    /// config cleanly unwinds), not from `-o` options at `activate`.
     ///
-    /// Values must not contain commas (the `-o` list delimiter) — true for
-    /// endpoints/buckets/regions/keys; secrets go through the Keychain instead.
-    pub fn mount_options(&self) -> Vec<(String, String)> {
+    /// `/memory` for the demo, or `/s3/<name>?bucket=..&access_key_id=..&region=..&
+    /// endpoint=..[&session_token=..]` for S3. `name` (the path segment) is the
+    /// extension's Keychain account. The **secret** is never here — it comes from
+    /// the Keychain, or [`crate::mounts::mount`] passes an `-o secret` for the
+    /// insecure path. The path need not exist on disk. Config values must not
+    /// contain the query delimiters `?&=#` (validated in [`Connection::from_form`]);
+    /// the extension parses this with `parse_source_path`.
+    pub fn source_path(&self) -> String {
         match &self.kind {
-            ConnectionKind::Memory => vec![("type".to_string(), "memory".to_string())],
+            ConnectionKind::Memory => "/memory".to_string(),
             ConnectionKind::S3(s3) => {
-                let mut opts = vec![
-                    ("type".to_string(), "s3".to_string()),
-                    ("name".to_string(), self.name.clone()),
-                    ("bucket".to_string(), s3.bucket.clone()),
-                    ("access_key_id".to_string(), s3.access_key_id.clone()),
+                let mut query = vec![
+                    format!("bucket={}", s3.bucket),
+                    format!("access_key_id={}", s3.access_key_id),
                 ];
                 if !s3.region.is_empty() {
-                    opts.push(("region".to_string(), s3.region.clone()));
+                    query.push(format!("region={}", s3.region));
                 }
                 if !s3.endpoint.is_empty() {
-                    opts.push(("endpoint".to_string(), s3.endpoint.clone()));
+                    query.push(format!("endpoint={}", s3.endpoint));
                 }
                 if let Some(token) = &s3.session_token {
-                    opts.push(("session_token".to_string(), token.clone()));
+                    query.push(format!("session_token={token}"));
                 }
-                opts
+                format!("/s3/{}?{}", self.name, query.join("&"))
             }
         }
     }
@@ -174,18 +173,22 @@ impl Connection {
         if !endpoint.is_empty() {
             validate_endpoint(endpoint)?;
         }
-        // Everything that rides the `-o` option string must avoid its comma delimiter.
+        // These fields ride the source path's query string (`?k=v&k=v`), so they
+        // must avoid its delimiters. (Endpoint keeps its `:` and `/` — those are
+        // fine in a query value.)
         for (label, value) in [
             ("Bucket", bucket),
             ("Region", region),
             ("Access Key ID", access_key_id),
+            ("Endpoint", endpoint),
             ("Session token", session_token),
         ] {
-            if value.contains(',') {
-                return Err(format!("{label} can't contain a comma."));
+            if let Some(bad) = value.chars().find(|c| matches!(c, '?' | '&' | '=' | '#')) {
+                return Err(format!("{label} can't contain '{bad}'."));
             }
         }
-        // The secret rides `-o` only when it isn't saved to the Keychain.
+        // The secret still rides `-o secret=…` when it isn't saved to the Keychain,
+        // so it must avoid the `-o` list's comma delimiter.
         if !input.save_secret_to_keychain && secret.contains(',') {
             return Err(
                 "Secret can't contain a comma unless it's saved to the Keychain.".to_string(),
@@ -441,14 +444,25 @@ mod tests {
     }
 
     #[test]
-    fn from_form_rejects_commas_in_o_fields() {
+    fn from_form_rejects_query_delimiters_in_path_fields() {
+        // Config fields ride the source path's query, so `?&=#` are rejected.
+        for bad in ["a&b", "a=b", "a?b", "a#b"] {
+            assert!(
+                Connection::from_form(FormInput {
+                    bucket: bad.to_string(),
+                    ..s3_form()
+                })
+                .is_err(),
+                "bucket {bad:?} should be rejected"
+            );
+        }
+        // A typical endpoint (with `:` and `/`) is fine — those aren't delimiters.
         assert!(Connection::from_form(FormInput {
-            bucket: "a,b".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
             ..s3_form()
         })
-        .unwrap_err()
-        .contains("comma"));
-        // A secret with a comma is fine when it goes to the Keychain, not `-o`.
+        .is_ok());
+        // The secret still rides `-o secret=…`, so a comma is fine only via Keychain.
         assert!(Connection::from_form(FormInput {
             secret: "se,cret".to_string(),
             save_secret_to_keychain: true,
@@ -474,41 +488,35 @@ mod tests {
     }
 
     #[test]
-    fn memory_mount_options_are_just_the_type() {
-        let opts = Connection::memory().mount_options();
-        assert_eq!(opts, vec![("type".to_string(), "memory".to_string())]);
+    fn memory_source_path_is_just_memory() {
+        assert_eq!(Connection::memory().source_path(), "/memory");
     }
 
     #[test]
-    fn s3_mount_options_start_with_the_type() {
-        let opts = s3_conn("photos").mount_options();
-        assert_eq!(opts.first(), Some(&("type".to_string(), "s3".to_string())));
+    fn s3_source_path_carries_config_but_never_the_secret() {
+        let path = s3_conn("photos").source_path();
+        // `/s3/<name>?<query>`.
+        assert!(path.starts_with("/s3/photos?"), "path was {path}");
+        for kv in [
+            "bucket=my-bucket",
+            "access_key_id=AKIA",
+            "region=us-east-1",
+            "endpoint=http://localhost:9000",
+        ] {
+            assert!(path.contains(kv), "{kv:?} missing from {path}");
+        }
+        assert!(!path.contains("secret"), "the secret is never in the path");
     }
 
     #[test]
-    fn s3_mount_options_carry_config_but_never_the_secret() {
-        let opts = s3_conn("photos").mount_options();
-        let has = |k: &str| opts.iter().any(|(key, _)| key == k);
-        assert!(has("name") && has("bucket") && has("access_key_id"));
-        assert!(has("region") && has("endpoint"));
-        assert!(!has("secret"), "the secret is never a mount option");
-        assert_eq!(
-            opts.iter()
-                .find(|(k, _)| k == "name")
-                .map(|(_, v)| v.as_str()),
-            Some("photos")
-        );
-    }
-
-    #[test]
-    fn s3_mount_options_skip_empty_optional_fields() {
+    fn s3_source_path_skips_empty_optional_fields() {
         let mut c = s3_conn("x");
         if let ConnectionKind::S3(m) = &mut c.kind {
             m.region = String::new();
             m.endpoint = String::new();
         }
-        let opts = c.mount_options();
-        assert!(!opts.iter().any(|(k, _)| k == "region" || k == "endpoint"));
+        let path = c.source_path();
+        assert!(!path.contains("region=") && !path.contains("endpoint="));
     }
 
     #[test]

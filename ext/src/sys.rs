@@ -15,7 +15,7 @@ use block2::DynBlock;
 use objc2::encode::{Encode, Encoding};
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{extern_class, extern_methods, extern_protocol, rc::Allocated, rc::Retained};
-use objc2_foundation::{NSArray, NSData, NSError, NSString, NSUUID};
+use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL, NSUUID};
 
 // ---- scalar typedefs (mirror FSKit's NS_ENUM/NS_OPTIONS) ---------------------
 
@@ -64,6 +64,22 @@ extern_class!(
     #[name = "FSResource"]
     pub struct FSResource;
 );
+
+extern_class!(
+    /// A path-URL resource — the source path passed to `mount`. FSKit delivers this
+    /// to `probe`/`loadResource` when `FSSupportsPathURLs`. We carry the connection
+    /// config in this path (see `parse_source_path`).
+    #[unsafe(super(FSResource))]
+    #[name = "FSPathURLResource"]
+    pub struct FSPathURLResource;
+);
+
+impl FSPathURLResource {
+    extern_methods!(
+        #[unsafe(method(url))]
+        pub fn url(&self) -> Retained<NSURL>;
+    );
+}
 
 extern_class!(
     /// Mount/load options — carries the `-o` tokens the mounting client passed.

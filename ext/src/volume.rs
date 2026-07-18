@@ -6,8 +6,9 @@
 //! an error. Each FSKit call runs the backend future to completion on the volume's
 //! tokio runtime and fires the reply block with the result (or a POSIX error).
 
+use std::collections::HashMap;
 use std::ptr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::DynBlock;
 use objc2::rc::Retained;
@@ -23,12 +24,15 @@ use crate::sys::*;
 
 /// Volume state carried on the ObjC instance.
 ///
-/// The backend is chosen from the mount's `-o` options, which FSKit delivers to
-/// `activateWithOptions:` (not `loadResource:`) — so it's filled in at activate
-/// time, once, via a `OnceLock`. Every operation runs after activate, so the
-/// backend is set by the time it's read; a still-empty lock is treated as EIO.
+/// The backend is resolved from the source path at `loadResource` and stored here
+/// (once) via `backend`. When the config was valid but the secret wasn't available
+/// at load (unsigned build can't read the Keychain), `pending` holds the parsed
+/// config and `activate` finishes the build once an `-o secret` arrives. Every op
+/// runs after activate, so `backend` is set by the time it's read; a still-empty
+/// lock is treated as EIO.
 pub struct VolumeIvars {
     backend: OnceLock<Arc<dyn StorageBackend>>,
+    pending: Mutex<Option<HashMap<String, String>>>,
     rt: Runtime,
 }
 
@@ -112,22 +116,39 @@ define_class!(
             // stale loaded process): the host compares the on-disk Info.plist SHA,
             // but only the running process can report its own compiled-in SHA.
             crate::log_line(&format!("activate: build {}", env!("FSKIT_S3_GIT_SHA")));
-            // The mount's `-o` config arrives HERE (not at loadResource), so this
-            // is where the backend is chosen. A misconfigured connection fails the
-            // activation (EINVAL) rather than mounting an unusable volume.
-            match crate::backend_for(options) {
-                Ok(backend) => {
-                    // Set once; activate runs a single time per mount.
-                    let _ = self.ivars().backend.set(backend);
-                }
-                Err(msg) => {
+            // Normally the backend was already resolved from the source path at
+            // `loadResource`, so activation is trivial (Apple's model). The one case
+            // left is a valid config whose secret wasn't available at load (unsigned
+            // build can't read the Keychain): the `-o secret` arrives now, so finish
+            // the build. A still-missing secret / bad config fails the activation.
+            if self.backend().is_none() {
+                let pending = self.ivars().pending.lock().ok().and_then(|mut g| g.take());
+                let result = match pending {
+                    Some(mut opts) => {
+                        let raw = crate::raw_task_options(options);
+                        if let Some(secret) = crate::parse_options(&raw).get("secret") {
+                            opts.insert("secret".to_string(), secret.clone());
+                        }
+                        crate::build_backend(opts)
+                    }
+                    None => Err("activate without a backend or pending config".to_string()),
+                };
+                let msg = match result {
+                    Ok(crate::BuildOutcome::Ready(backend)) => {
+                        let _ = self.ivars().backend.set(backend);
+                        None
+                    }
+                    Ok(crate::BuildOutcome::NeedSecret(_)) => {
+                        Some("no secret (Keychain or -o secret)".to_string())
+                    }
+                    Err(msg) => Some(msg),
+                };
+                if let Some(msg) = msg {
                     crate::log_line(&format!("activate failed: {msg}"));
-                    // Signal the loaded container back to `notReady` — carrying the
-                    // same error we reply with — so fskitd can tear this instance
-                    // down (with the reason) instead of leaving it stuck holding the
-                    // resource (which makes the next mount fail at probe with
-                    // "Resource busy").
-                    let e = err(libc::EINVAL);
+                    // Signal the container back to `notReady` (with the reason) so
+                    // fskitd tears this instance down instead of leaving it stuck.
+                    // The message carries into `mount`'s output, not "Invalid argument".
+                    let e = crate::error_with_message(libc::EINVAL, &msg);
                     crate::signal_container_not_ready(Some(&e));
                     reply.call((ptr::null_mut(), Retained::as_ptr(&e) as *mut NSError));
                     return;
@@ -549,18 +570,32 @@ define_class!(
 );
 
 impl S3Volume {
-    /// Build a volume whose futures run on `rt`. The backend is not known yet —
-    /// it's chosen from the `-o` options at `activate` time and stored then.
+    /// Build a volume whose futures run on `rt`. `loadResource` fills in either the
+    /// resolved backend ([`set_backend`]) or the pending config ([`set_pending`]).
     pub fn new(volume_id: &FSVolumeIdentifier, name: &FSFileName, rt: Runtime) -> Retained<Self> {
         let this = Self::alloc().set_ivars(VolumeIvars {
             backend: OnceLock::new(),
+            pending: Mutex::new(None),
             rt,
         });
         unsafe { msg_send![super(this), initWithVolumeID: volume_id, volumeName: name] }
     }
 
-    /// The backend selected at activate, or `None` if activate hasn't set it
-    /// (or failed to build one). Callers map `None` to EIO.
+    /// Store the resolved backend (config + secret both available at load).
+    pub fn set_backend(&self, backend: Arc<dyn StorageBackend>) {
+        let _ = self.ivars().backend.set(backend);
+    }
+
+    /// Store a valid config whose secret must still come from an `-o secret` at
+    /// `activate` (the extension couldn't read the Keychain at load).
+    pub fn set_pending(&self, opts: HashMap<String, String>) {
+        if let Ok(mut g) = self.ivars().pending.lock() {
+            *g = Some(opts);
+        }
+    }
+
+    /// The resolved backend, or `None` if it hasn't been set yet. Callers map
+    /// `None` to EIO.
     fn backend(&self) -> Option<&Arc<dyn StorageBackend>> {
         self.ivars().backend.get()
     }

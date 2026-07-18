@@ -26,9 +26,9 @@ use std::sync::{Arc, OnceLock};
 
 use block2::DynBlock;
 use objc2::rc::Retained;
-use objc2::runtime::NSObjectProtocol;
+use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{define_class, msg_send, AllocAnyThread, ClassType};
-use objc2_foundation::{NSError, NSString, NSUUID};
+use objc2_foundation::{NSDictionary, NSError, NSString, NSUUID};
 
 use fskit_s3_backend::{OpenDalBackend, S3Config};
 use fskit_s3_core::mem::InMemoryBackend;
@@ -36,8 +36,9 @@ use fskit_s3_core::StorageBackend;
 
 use item::S3Item;
 use sys::{
-    FSContainerIdentifier, FSContainerStatus, FSFileName, FSProbeResult, FSResource, FSTaskOptions,
-    FSUnaryFileSystem, FSUnaryFileSystemOperations, FSVolume, FSVolumeIdentifier,
+    FSContainerIdentifier, FSContainerStatus, FSFileName, FSPathURLResource, FSProbeResult,
+    FSResource, FSTaskOptions, FSUnaryFileSystem, FSUnaryFileSystemOperations, FSVolume,
+    FSVolumeIdentifier,
 };
 use volume::S3Volume;
 
@@ -77,14 +78,29 @@ define_class!(
             _options: &FSTaskOptions,
             reply: &DynBlock<dyn Fn(*mut FSVolume, *mut NSError)>,
         ) {
-            // Transition the container from `notReady` to `ready`; without this
-            // FSKit rejects the load with "unexpected container state" (POSIX 35).
-            self.set_container_state(ContainerState::Ready);
-            // NB: `loadResource` does NOT receive the mount's `-o` options — FSKit
-            // delivers those to the volume's `activateWithOptions:` (they are parsed
-            // per `FSActivateOptionSyntax`). So the backend can't be chosen here; we
-            // build the volume now (with its tokio runtime) and defer backend
-            // selection to `activate`, which is where the config actually arrives.
+            // The connection's config rides in the source PATH (e.g.
+            // `/s3/<name>?bucket=..&region=..&access_key_id=..&endpoint=..`), which
+            // FSKit delivers here as an `FSPathURLResource`. Resolving it at LOAD —
+            // rather than from `-o` options at `activate` — means a bad config fails
+            // the load, which fskitd cleanly unwinds (no stuck instance / "Resource
+            // busy"). The secret is never in the path: it comes from the Keychain by
+            // `name`, or, when the extension can't read the Keychain (unsigned build),
+            // from an `-o secret` that only arrives at `activate` — so a config that's
+            // valid but still lacks a secret is deferred, not failed.
+            let source = source_path(_resource);
+            log_line(&format!("loadResource source = {source:?}"));
+            let outcome = match build_backend(parse_source_path(&source)) {
+                Ok(outcome) => outcome,
+                Err(msg) => {
+                    log_line(&format!("loadResource failed: {msg}"));
+                    // Signal the failed load so fskitd tears the instance down.
+                    self.set_container_state(ContainerState::NotReady);
+                    // Carry the reason so `mount` prints it, not "Invalid argument".
+                    let err = error_with_message(libc::EINVAL, &msg);
+                    reply.call((ptr::null_mut(), Retained::as_ptr(&err) as *mut NSError));
+                    return;
+                }
+            };
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -102,6 +118,16 @@ define_class!(
                 let name = FSFileName::nameWithString(&NSString::from_str("fskit-s3"));
                 S3Volume::new(&vid, &name, rt)
             };
+            match outcome {
+                BuildOutcome::Ready(backend) => volume.set_backend(backend),
+                BuildOutcome::NeedSecret(pending) => {
+                    log_line("loadResource: config valid, secret deferred to activate");
+                    volume.set_pending(pending);
+                }
+            }
+            // Transition the container to `ready`; without this FSKit rejects the
+            // load with "unexpected container state" (POSIX 35).
+            self.set_container_state(ContainerState::Ready);
             // Transfer ownership (+1) to FSKit: it holds the volume for the whole
             // mount, well past this call, so a borrowed pointer would dangle.
             let volume_ptr = Retained::into_raw(volume) as *mut FSVolume;
@@ -183,34 +209,70 @@ fn demo_backend() -> Arc<dyn StorageBackend> {
 const KEYCHAIN_SERVICE: &str = "dev.lucsoft.fskit-s3";
 const KEYCHAIN_ACCESS_GROUP: &str = "H8563U643B.dev.lucsoft.fskit-s3";
 
-/// Choose the backend for a mount from its `-o` options, dispatching on the
-/// explicit `type` the app always sends.
-///
-/// `type=memory` ⇒ the demo; `type=s3` ⇒ an S3 bucket (secret from `Keychain[name]`
-/// else the `-o secret`). A **missing `type`** is an error — we refuse to guess and
-/// never silently fall back to the demo, so a config/`-o`-delivery problem fails
-/// the mount loudly instead of masquerading as the demo.
-fn backend_for(options: &FSTaskOptions) -> Result<Arc<dyn StorageBackend>, String> {
-    let raw = raw_task_options(options);
-    log_line(&format!(
-        "loadResource taskOptions ({}): {raw:?}",
-        raw.len()
-    ));
-    let opts = parse_options(&raw);
+/// The local path of a `mount` resource (our config-carrying source path), or
+/// empty when it isn't a path-URL resource.
+fn source_path(resource: &FSResource) -> String {
+    resource
+        .downcast_ref::<FSPathURLResource>()
+        .and_then(|r| r.url().path())
+        .map(|p| p.to_string())
+        .unwrap_or_default()
+}
 
+/// Parse a source path into the same `key=value` option map the config uses.
+///
+/// The path is `/<type>[/<name>][?k=v&k=v…]` — e.g. `/memory` or
+/// `/s3/<name>?bucket=..&region=..&access_key_id=..&endpoint=..`. The first
+/// segment is `type`, the second (if any) `name`, and the query carries the rest.
+/// Values may not contain `&`/`=` (the app validates this); the secret is never here.
+fn parse_source_path(path: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let trimmed = path.trim_start_matches('/');
+    let (head, query) = trimmed.split_once('?').unwrap_or((trimmed, ""));
+    let mut segs = head.splitn(2, '/');
+    if let Some(t) = segs.next().filter(|s| !s.is_empty()) {
+        map.insert("type".to_string(), t.to_string());
+    }
+    if let Some(name) = segs.next().filter(|s| !s.is_empty()) {
+        map.insert("name".to_string(), name.to_string());
+    }
+    for part in query.split('&') {
+        if let Some((key, value)) = part.split_once('=') {
+            map.insert(key.trim().to_string(), value.to_string());
+        }
+    }
+    map
+}
+
+/// The result of resolving a config map into a backend.
+pub(crate) enum BuildOutcome {
+    /// A ready-to-serve backend.
+    Ready(Arc<dyn StorageBackend>),
+    /// The config is valid but no secret was available yet (the extension couldn't
+    /// read the Keychain, so it must come from an `-o secret` at `activate`). Carries
+    /// the parsed config so `activate` can finish once the secret arrives.
+    NeedSecret(HashMap<String, String>),
+}
+
+/// Resolve a parsed config map into a backend, dispatching on `type`.
+///
+/// `type=memory` ⇒ the demo; `type=s3` ⇒ an S3 bucket. A missing/unknown `type` or
+/// missing required S3 fields is an `Err` — the caller fails the **load**, which
+/// fskitd cleanly unwinds. A valid S3 config with no obtainable secret is
+/// `Ok(NeedSecret)` — deferred to `activate`, not failed.
+pub(crate) fn build_backend(opts: HashMap<String, String>) -> Result<BuildOutcome, String> {
     match opts.get("type").map(String::as_str) {
-        Some("memory") => Ok(demo_backend()),
-        Some("s3") => build_s3_backend(&opts),
+        Some("memory") => Ok(BuildOutcome::Ready(demo_backend())),
+        Some("s3") => build_s3_backend(opts),
         Some(other) => Err(format!("unknown connection type {other:?}")),
-        None => Err(format!(
-            "no connection type in mount options — refusing to guess (taskOptions: {raw:?})"
-        )),
+        None => Err("no connection type in source path".to_string()),
     }
 }
 
-/// Build the S3 backend from the parsed `-o` options.
-fn build_s3_backend(opts: &HashMap<String, String>) -> Result<Arc<dyn StorageBackend>, String> {
-    let name = opts.get("name").map(String::as_str).unwrap_or("");
+/// Build the S3 backend from a parsed config map, or defer if only the secret is
+/// missing. Takes ownership so it can hand the map back in [`BuildOutcome::NeedSecret`].
+fn build_s3_backend(opts: HashMap<String, String>) -> Result<BuildOutcome, String> {
+    let name = opts.get("name").cloned().unwrap_or_default();
     let bucket = opts.get("bucket").cloned().unwrap_or_default();
     let access_key_id = opts.get("access_key_id").cloned().unwrap_or_default();
     if bucket.is_empty() || access_key_id.is_empty() {
@@ -218,10 +280,13 @@ fn build_s3_backend(opts: &HashMap<String, String>) -> Result<Arc<dyn StorageBac
             "S3 connection {name:?}: missing bucket/access_key_id"
         ));
     }
-    let secret_access_key = read_keychain_secret(name)
-        .or_else(|| opts.get("secret").cloned())
-        .ok_or_else(|| format!("S3 connection {name:?}: no secret (Keychain or -o secret)"))?;
-
+    // Secret: Keychain by name (the secure default), else an `-o secret` — which is
+    // only present once this map has been merged with activate's options.
+    let Some(secret_access_key) =
+        read_keychain_secret(&name).or_else(|| opts.get("secret").cloned())
+    else {
+        return Ok(BuildOutcome::NeedSecret(opts));
+    };
     let cfg = S3Config {
         bucket,
         region: opts.get("region").cloned().unwrap_or_default(),
@@ -231,7 +296,7 @@ fn build_s3_backend(opts: &HashMap<String, String>) -> Result<Arc<dyn StorageBac
         session_token: opts.get("session_token").cloned(),
     };
     let backend = OpenDalBackend::s3(&cfg).map_err(|e| e.to_string())?;
-    Ok(Arc::new(backend))
+    Ok(BuildOutcome::Ready(Arc::new(backend)))
 }
 
 /// The raw `FSTaskOptions.taskOptions` tokens (the argv-equivalent array).
@@ -276,6 +341,27 @@ fn posix_error(errno: i32) -> Retained<NSError> {
             &NSString::from_str("NSPOSIXErrorDomain"),
             errno as isize,
             None,
+        )
+    }
+}
+
+/// An `NSError` whose `localizedDescription` is `message`, so `mount` prints the
+/// real reason ("… missing bucket/access_key_id") instead of the generic errno
+/// text ("Invalid argument"). `mount` shows an NSError's `localizedDescription`,
+/// which honours an explicit `NSLocalizedDescription` in `userInfo`.
+pub(crate) fn error_with_message(errno: i32, message: &str) -> Retained<NSError> {
+    let key = NSString::from_str("NSLocalizedDescription");
+    let value = NSString::from_str(message);
+    // userInfo is `NSDictionary<NSString, AnyObject>`, so the value goes in as an
+    // untyped object.
+    let value_obj: &AnyObject = &value;
+    let user_info = NSDictionary::from_slices(&[&*key], &[value_obj]);
+    // SAFETY: standard NSError factory; domain string + a valid userInfo dict.
+    unsafe {
+        NSError::errorWithDomain_code_userInfo(
+            &NSString::from_str("NSPOSIXErrorDomain"),
+            errno as isize,
+            Some(&user_info),
         )
     }
 }

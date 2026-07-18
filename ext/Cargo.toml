@@ -34,6 +34,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSData",       # icon/buffer payloads across the FSKit boundary
     "NSError",      # error replies to FSKit
     "NSUUID",       # container + volume identifiers
+    "NSURL",        # FSPathURLResource.url — the source path, read at loadResource
     # NSError::errorWithDomain:code:userInfo: is gated on the Foundation `NSObject`
     # category and takes an NSDictionary userInfo, so both are required to build it.
     "NSObject",

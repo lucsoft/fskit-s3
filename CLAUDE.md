@@ -121,20 +121,25 @@ prefix).
   `FSKitS3Volume` — the read path (activate/lookup/getAttributes/enumerate/read)
   **and** the write path (create/write/setAttributes/remove/rename) against a
   `StorageBackend` on a tokio runtime; only symlink/hard-link ops reply `ENOTSUP`.
-  It also **picks the backend** in `activateWithOptions:` (`backend_for`), because
-  that's where FSKit delivers the mount's `-o` options — see the gotcha below —
-  dispatching on an explicit `type`: `type=s3` (secret from the shared Keychain
-  group, else an `-o secret`) or `type=memory` (the demo). A missing/unknown
-  `type` **fails the activation** — it never silently serves the demo. `lib.rs`:
-  `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
-  `fskit_s3_make_filesystem` entry point. `loadResource` builds the volume (with
-  its tokio runtime) but leaves the backend unset, since the `-o` options aren't
-  available yet at load time.
+  `lib.rs`: `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
+  `fskit_s3_make_filesystem` entry point. It **resolves the backend at
+  `loadResource`** from the mount's **source path** — the config rides there as a
+  self-describing path (`/memory`, or `/s3/<name>?bucket=..&region=..&
+  access_key_id=..&endpoint=..`), which FSKit delivers as an `FSPathURLResource`
+  (`parse_source_path` → `build_backend`). Resolving at load (Apple's model) means
+  a **bad config fails the load**, which fskitd cleanly unwinds — no stuck instance
+  / "Resource busy" on retry. `activateWithOptions:` is then trivial. The **secret**
+  is never in the path: `Keychain[name]`, or — when the ext can't read the Keychain
+  (unsigned build) — an `-o secret` that only arrives at `activate`, so a valid
+  config lacking only the secret is *deferred* to activate (`VolumeIvars.pending`),
+  not failed. (Earlier this used `-o` config chosen at `activate`; that crashed on
+  the teardown path — see the source-path note.)
 - **`app/src/`** — `fskit-s3-app`, the macOS app (a status-bar app):
   - `connection.rs` — the `Connection`/`ConnectionKind` (`Memory` | `S3(S3Meta)`)
     model + the persisted `Registry` (`~/Library/Application Support/fskit-s3/
-    connections.json`, which **never holds a secret**). `mount_options()` emits an
-    S3 connection's non-secret config as `-o` pairs.
+    connections.json`, which **never holds a secret**). `source_path()` emits the
+    self-describing mount source (`/memory` or `/s3/<name>?bucket=..&..`); config
+    fields must avoid the query delimiters `?&=#` (validated in `from_form`).
   - `keychain.rs` — the S3 secret in the Keychain (`security-framework`),
     preferring a **shared access group** the extension can read (falls back to the
     default keychain when unsigned).
@@ -332,6 +337,24 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   the loadResource step with **`Invalid argument` / EINVAL (POSIX 22)** ("mount:
   Loading resource: … Invalid argument"). This masqueraded as a Keychain/config
   problem for a while; it isn't. (Confirmed by dumping `taskOptions` per phase.)
+- **Config rides the source PATH, not `-o`; the secret is the exception.** Because
+  `-o` options only reach `activate` (above), and an `activate` failure doesn't
+  unwind (fskitd leaves a stuck instance → next mount fails at probe with "Resource
+  busy"), the connection config is carried in the **source path** instead
+  (`/s3/<name>?bucket=..&region=..&access_key_id=..&endpoint=..`, or `/memory`) and
+  resolved at `loadResource`, where a bad config fails the *load* — which fskitd
+  cleanly tears down. The path need not exist on disk; `?`/`&`/`=` ride fine as
+  literal path chars (the `?` shows as `%3F` in the mount table). The **secret** is
+  never in the path (it'd show in `ps`/`mount`): `Keychain[name]`, else an
+  `-o secret` at `activate` (so a valid config still lacking a secret is *deferred*
+  to activate, not failed).
+- **An arbitrary-scheme source URL crashes fskitd — use a plain path.** Giving
+  `mount` an `s3://…` source (with `FSSupportsGenericURLResources`) makes fskitd
+  **segfault** in `-[FSPathURLResource makeProxy]` (it coerces the URL into a path
+  resource): `EXC_BAD_ACCESS at 0x20`, before our `loadResource` runs. A real path
+  shape (`/s3/…`) goes through fine. So the source is always an `FSPathURLResource`
+  path (`FSSupportsPathURLs`), never a generic/`s3://` URL. (An Apple bug — a
+  framework shouldn't crash on input — but unavoidable from our side.)
 - Nuclear reset for accumulated daemon state: `sudo killall fskitd`.
 
 Next: verify the **write path** end-to-end on a signed build (create/write/mv/rm/

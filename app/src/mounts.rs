@@ -62,21 +62,20 @@ pub fn list_fskit() -> Vec<Mount> {
 /// Mount a connection at `mount_point`.
 ///
 /// Ensures the mount point exists, then runs
-/// `mount -F -t fskit-s3 [-o <opts>] <mount_point> <mount_point>`, where `<opts>`
-/// is the connection's [`mount_options`](Connection::mount_options)
-/// (per-connection config, empty for the memory demo). The mount point doubles
-/// as the `mount` resource argument — the extension never reads the resource's
-/// contents (it picks its backend from `-o`), so there's no separate resource
-/// directory. When `secret` is supplied it's appended as `secret=…` — the
-/// **insecure** path, only for connections whose secret isn't in the Keychain
-/// (the ext prefers `Keychain[name]`). Requires the FSKit extension to be
-/// installed and enabled; if it isn't, `mount` fails and its stderr is returned
-/// unchanged.
+/// `mount -F -t fskit-s3 [-o secret=…] <source> <mount_point>`, where `<source>`
+/// is the connection's [`source_path`](Connection::source_path) — a self-describing
+/// path (`/memory` or `/s3/<name>?…`) that carries the whole config, so the
+/// extension resolves it at `loadResource`. The source needn't exist on disk. When
+/// `secret` is supplied it's passed as `-o secret=…` — the **insecure** path, only
+/// for connections whose secret isn't in the Keychain (the ext prefers
+/// `Keychain[name]`). Requires the FSKit extension to be installed and enabled; if
+/// it isn't, `mount` fails and its stderr is returned unchanged.
 pub fn mount(conn: &Connection, mount_point: &Path, secret: Option<&str>) -> Result<(), String> {
     fs::create_dir_all(mount_point)
         .map_err(|e| format!("create mount point {}: {e}", mount_point.display()))?;
 
-    let mut options = conn.mount_options();
+    // The secret is the only `-o` option left; all other config rides the source path.
+    let mut options = Vec::new();
     if let Some(secret) = secret {
         options.push(("secret".to_string(), secret.to_string()));
     }
@@ -87,7 +86,7 @@ pub fn mount(conn: &Connection, mount_point: &Path, secret: Option<&str>) -> Res
         cmd.arg("-o").arg(opts);
     }
     let out = cmd
-        .arg(mount_point)
+        .arg(conn.source_path())
         .arg(mount_point)
         .output()
         .map_err(|e| e.to_string())?;
