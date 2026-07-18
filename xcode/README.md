@@ -36,6 +36,13 @@ provisioning profile is missing `com.apple.developer.fskit.fsmodule`:
 This needs an **Admin/App Manager** role on the BBN team, and a **paid**
 membership (the capability isn't available to free teams).
 
+Both targets also share a **Keychain access group** (`keychain-access-groups` in
+both entitlements files) so the app can hand the extension an S3 secret. Enable
+**Keychain Sharing** on both App IDs (`dev.lucsoft.fskit-s3` and
+`dev.lucsoft.fskit-s3.ext`) the same way — Identifiers ▸ each App ID ▸ **Keychain
+Sharing** — or add the *Keychain Sharing* capability to each target in Xcode ▸
+Signing & Capabilities and let automatic signing regenerate the profiles.
+
 ## Build, install, mount
 
 1. Scheme **fskit-s3-host** ▸ **Build & Run** (this signs + registers the extension).

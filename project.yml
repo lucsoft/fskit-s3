@@ -81,3 +81,9 @@ targets:
     dependencies:
       - sdk: FSKit.framework
       - sdk: ExtensionFoundation.framework
+      # Pulled in by the Rust staticlib once fskit-s3-backend (OpenDAL/reqwest/
+      # rustls) + security-framework are linked: Security for Keychain + TLS trust,
+      # SystemConfiguration for proxy/DNS resolution. If the linker still reports
+      # "Undefined symbols … framework", add the named framework here too.
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework

@@ -14,7 +14,7 @@ use core::ffi::c_void;
 use block2::DynBlock;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{extern_class, extern_methods, extern_protocol, rc::Allocated, rc::Retained};
-use objc2_foundation::{NSData, NSError, NSString, NSUUID};
+use objc2_foundation::{NSArray, NSData, NSError, NSString, NSUUID};
 
 // ---- scalar typedefs (mirror FSKit's NS_ENUM/NS_OPTIONS) ---------------------
 
@@ -43,11 +43,20 @@ extern_class!(
 );
 
 extern_class!(
-    /// Mount/load options (`-f`, `--rdonly`, …). Opaque to us for now.
+    /// Mount/load options — carries the `-o` tokens the mounting client passed.
     #[unsafe(super(NSObject))]
     #[name = "FSTaskOptions"]
     pub struct FSTaskOptions;
 );
+
+impl FSTaskOptions {
+    extern_methods!(
+        /// The raw `-o` option tokens (each a `key=value` or a bare flag), as
+        /// passed to `mount`. This is how a connection's config reaches us.
+        #[unsafe(method(taskOptions))]
+        pub fn taskOptions(&self) -> Retained<NSArray<NSString>>;
+    );
+}
 
 // ---- identifiers -------------------------------------------------------------
 

@@ -9,8 +9,14 @@
     <true/>
     <key>com.apple.security.app-sandbox</key>
     <true/>
-    <!-- Needed once the S3 backend is wired in (outbound HTTPS). Harmless now. -->
+    <!-- Outbound HTTPS for the S3 backend. -->
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- Shared Keychain access group: the extension reads the S3 secret the app
+         stored here. Must match the app's group exactly (same team-id prefix). -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)dev.lucsoft.fskit-s3</string>
+    </array>
 </dict>
 </plist>

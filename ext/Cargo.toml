@@ -15,10 +15,12 @@ crate-type = ["staticlib"]
 
 [dependencies]
 fskit-s3-core = { workspace = true, features = ["mem"] }
-# NOTE: fskit-s3-backend (OpenDAL/reqwest/rustls) is intentionally NOT a
-# dependency yet. The demo mount uses the in-memory backend, so the staticlib
-# links only FSKit + Foundation + libSystem — no Security/SystemConfiguration
-# framework juggling in Xcode. Add it back when wiring the S3 backend + Keychain.
+# The S3 backend (OpenDAL/reqwest/rustls). Linking this into the staticlib pulls
+# in Security.framework + SystemConfiguration.framework on the Xcode side — see
+# project.yml. The demo in-memory backend is still the fallback for `memory`.
+fskit-s3-backend = { workspace = true }
+# Reads the S3 secret from the shared Keychain access group (see Extension.entitlements).
+security-framework = "3"
 # The multi-threaded runtime the ext spawns backend futures on. tokio has no
 # default features, so `rt-multi-thread` (which pulls in `rt`) is the whole ask.
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
@@ -36,6 +38,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # category and takes an NSDictionary userInfo, so both are required to build it.
     "NSObject",
     "NSDictionary",
+    "NSArray", # FSTaskOptions.taskOptions returns NSArray<NSString> (the -o tokens)
 ] }
 # `DynBlock` — FSKit's reply handlers are ObjC blocks. `std` is block2's default.
 block2 = { version = "0.6", default-features = false, features = ["std"] }

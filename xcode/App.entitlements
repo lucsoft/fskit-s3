@@ -1,10 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Host app entitlements: just the sandbox. The FSKit capability lives on the
-     extension target, not here. -->
+<!-- Host app entitlements: the sandbox + the shared Keychain access group. The
+     app writes an S3 connection's secret to this group; the extension reads it
+     back (both targets must list the identical group, and the App ID needs the
+     "Keychain Sharing" capability — see xcode/README.md). The FSKit capability
+     lives on the extension target, not here. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>com.apple.security.app-sandbox</key>
     <true/>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)dev.lucsoft.fskit-s3</string>
+    </array>
 </dict>
 </plist>

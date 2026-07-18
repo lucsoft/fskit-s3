@@ -7,8 +7,10 @@
 //! [`fskit_s3_make_filesystem`], which registers these Rust-defined classes and
 //! returns the (cached, singleton) delegate instance.
 //!
-//! Backend selection is currently the no-credential in-memory demo, so the
-//! plumbing can be validated before wiring S3 config + Keychain.
+//! `loadResource` picks the backend from the mount's `-o` options (see
+//! [`backend_for`]): an S3 bucket for a named connection — with the secret read
+//! from the shared Keychain access group (else an `-o secret`) — or the
+//! credential-free in-memory demo for `memory`/unnamed mounts.
 
 #![allow(non_snake_case)]
 
@@ -16,6 +18,7 @@ mod item;
 mod sys;
 mod volume;
 
+use std::collections::HashMap;
 use std::ptr;
 use std::sync::{Arc, OnceLock};
 
@@ -25,6 +28,7 @@ use objc2::runtime::NSObjectProtocol;
 use objc2::{define_class, msg_send, AllocAnyThread, ClassType};
 use objc2_foundation::{NSError, NSString, NSUUID};
 
+use fskit_s3_backend::{OpenDalBackend, S3Config};
 use fskit_s3_core::mem::InMemoryBackend;
 use fskit_s3_core::StorageBackend;
 
@@ -68,7 +72,7 @@ define_class!(
         fn load(
             &self,
             _resource: &FSResource,
-            _options: &FSTaskOptions,
+            options: &FSTaskOptions,
             reply: &DynBlock<dyn Fn(*mut FSVolume, *mut NSError)>,
         ) {
             // Transition the container from `notReady` to `ready`; without this
@@ -80,15 +84,19 @@ define_class!(
             {
                 Ok(rt) => rt,
                 Err(_) => {
-                    // SAFETY: standard NSError factory with a valid domain + nil userInfo.
-                    let error = unsafe {
-                        NSError::errorWithDomain_code_userInfo(
-                            &NSString::from_str("NSPOSIXErrorDomain"),
-                            libc::EIO as isize,
-                            None,
-                        )
-                    };
-                    reply.call((ptr::null_mut(), Retained::as_ptr(&error) as *mut NSError));
+                    let err = posix_error(libc::EIO);
+                    reply.call((ptr::null_mut(), Retained::as_ptr(&err) as *mut NSError));
+                    return;
+                }
+            };
+            // Pick the backend from the `-o` options: an S3 bucket for a named
+            // connection, else the in-memory demo. A misconfigured S3 connection
+            // fails the mount rather than silently serving the demo.
+            let backend = match backend_for(options) {
+                Ok(backend) => backend,
+                Err(_) => {
+                    let err = posix_error(libc::EINVAL);
+                    reply.call((ptr::null_mut(), Retained::as_ptr(&err) as *mut NSError));
                     return;
                 }
             };
@@ -96,7 +104,7 @@ define_class!(
                 let uuid = NSUUID::new();
                 let vid = FSVolumeIdentifier::initWithUUID(FSVolumeIdentifier::alloc(), &uuid);
                 let name = FSFileName::nameWithString(&NSString::from_str("fskit-s3"));
-                S3Volume::new(&vid, &name, demo_backend(), rt)
+                S3Volume::new(&vid, &name, backend, rt)
             };
             // Transfer ownership (+1) to FSKit: it holds the volume for the whole
             // mount, well past this call, so a borrowed pointer would dangle.
@@ -145,13 +153,89 @@ impl FileSystem {
     }
 }
 
-/// The backend a mounted volume reads from. For now, a no-credential in-memory
-/// demo tree; S3/Keychain configuration replaces this.
+/// The no-credential in-memory demo tree (served for the `memory` connection and
+/// when no connection is named).
 fn demo_backend() -> Arc<dyn StorageBackend> {
     let mut b = InMemoryBackend::new();
     b.insert("readme.txt", b"mounted by fskit-s3\n".to_vec())
         .insert("photos/cover.png", vec![0u8; 32]);
     Arc::new(b)
+}
+
+/// Keychain identity shared with the app (`app/src/keychain.rs`).
+const KEYCHAIN_SERVICE: &str = "dev.lucsoft.fskit-s3";
+const KEYCHAIN_ACCESS_GROUP: &str = "H8563U643B.dev.lucsoft.fskit-s3";
+
+/// Choose the backend for a mount from its `-o` options.
+///
+/// `name` absent or `memory` ⇒ the demo. Otherwise an S3 bucket, with the secret
+/// resolved as `Keychain[name]` else the `-o secret` value. Returns `Err` (⇒ the
+/// mount fails) when a named S3 connection is missing required config or a secret,
+/// rather than silently serving the demo.
+fn backend_for(options: &FSTaskOptions) -> Result<Arc<dyn StorageBackend>, String> {
+    let opts = parse_options(options);
+    let name = opts.get("name").map(String::as_str).unwrap_or("");
+    if name.is_empty() || name == "memory" {
+        return Ok(demo_backend());
+    }
+
+    let bucket = opts.get("bucket").cloned().unwrap_or_default();
+    let access_key_id = opts.get("access_key_id").cloned().unwrap_or_default();
+    if bucket.is_empty() || access_key_id.is_empty() {
+        return Err(format!(
+            "S3 connection {name:?}: missing bucket/access_key_id"
+        ));
+    }
+    let secret_access_key = read_keychain_secret(name)
+        .or_else(|| opts.get("secret").cloned())
+        .ok_or_else(|| format!("S3 connection {name:?}: no secret (Keychain or -o secret)"))?;
+
+    let cfg = S3Config {
+        bucket,
+        region: opts.get("region").cloned().unwrap_or_default(),
+        endpoint: opts.get("endpoint").cloned().unwrap_or_default(),
+        access_key_id,
+        secret_access_key,
+        session_token: opts.get("session_token").cloned(),
+    };
+    let backend = OpenDalBackend::s3(&cfg).map_err(|e| e.to_string())?;
+    Ok(Arc::new(backend))
+}
+
+/// Parse `FSTaskOptions.taskOptions` (`key=value` tokens) into a map.
+fn parse_options(options: &FSTaskOptions) -> HashMap<String, String> {
+    let tokens = options.taskOptions();
+    let mut map = HashMap::new();
+    for i in 0..tokens.count() {
+        let token = tokens.objectAtIndex(i).to_string();
+        if let Some((key, value)) = token.split_once('=') {
+            map.insert(key.to_string(), value.to_string());
+        }
+    }
+    map
+}
+
+/// Read an S3 connection's secret from the shared Keychain access group (the item
+/// the app stored). `None` if absent or unreadable.
+fn read_keychain_secret(name: &str) -> Option<String> {
+    use security_framework::passwords::{generic_password, PasswordOptions};
+    let mut opts = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, name);
+    opts.set_access_group(KEYCHAIN_ACCESS_GROUP);
+    let bytes = generic_password(opts).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Build a `Retained<NSError>` for a POSIX errno (nil userInfo). The caller keeps
+/// it alive across the reply block (the pointer is borrowed, +0).
+fn posix_error(errno: i32) -> Retained<NSError> {
+    // SAFETY: standard NSError factory with a valid domain string + nil userInfo.
+    unsafe {
+        NSError::errorWithDomain_code_userInfo(
+            &NSString::from_str("NSPOSIXErrorDomain"),
+            errno as isize,
+            None,
+        )
+    }
 }
 
 /// Force-register the Rust-defined FSKit classes with the Objective-C runtime.

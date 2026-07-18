@@ -100,23 +100,28 @@ prefix).
   `FSKitS3Volume` — the read path (activate/lookup/getAttributes/enumerate/read)
   against a `StorageBackend` on a tokio runtime; mutating ops reply `EROFS`.
   `lib.rs`: `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
-  `fskit_s3_make_filesystem` entry point.
-- **`app/src/`** — `fskit-s3-app`, the macOS app (a status-bar app), which owns
-  both the management logic and the UI:
-  - `connection.rs` — the `Connection`/`ConnectionKind`/`Registry` model (a
-    *connection* is a mountable endpoint; today only the in-memory `Demo`, held in
-    an in-memory registry seeded from `Registry::with_defaults`).
-  - `mounts.rs` — the mount table + `mount` (`mount -F -t fskit-s3 [-o …] …`) /
-    `unmount` actions. A connection's config rides as `-o` options
-    (`Connection::mount_options`), so there is **no bespoke CLI** — the system
-    `mount`/`umount` are that. These two modules are pure Rust (shell out to
-    `mount`/`diskutil`), fully unit-tested, panic-denied.
-  - `main.rs` + `appkit.rs` — the AppKit UI (`objc2`): the dropdown lists
-    connections (each *Mount*) and active mounts (each *Unmount*). `appkit.rs` is
-    the *only* module that writes `unsafe`, behind checked helpers.
+  `fskit_s3_make_filesystem` entry point. `loadResource` picks the backend from
+  the mount's `-o` options (`backend_for`): an S3 bucket for a named connection —
+  secret from the shared Keychain group, else an `-o secret` — or the in-memory
+  demo for `memory`/unnamed mounts.
+- **`app/src/`** — `fskit-s3-app`, the macOS app (a status-bar app):
+  - `connection.rs` — the `Connection`/`ConnectionKind` (`Memory` | `S3(S3Meta)`)
+    model + the persisted `Registry` (`~/Library/Application Support/fskit-s3/
+    connections.json`, which **never holds a secret**). `mount_options()` emits an
+    S3 connection's non-secret config as `-o` pairs.
+  - `keychain.rs` — the S3 secret in the Keychain (`security-framework`),
+    preferring a **shared access group** the extension can read (falls back to the
+    default keychain when unsigned).
+  - `s3check.rs` — the "Test and Save" credential check (lists the bucket via
+    `fskit-s3-backend`/OpenDAL, the same backend the extension serves with).
+  - `mounts.rs` — the mount table + `mount`/`unmount` (`mount -F -t fskit-s3
+    [-o …]`). No bespoke CLI — the system `mount`/`umount` are that.
+  - `addwindow.rs` — the Add-mount form + the secret-prompt window (native
+    `NSWindow`).
+  - `main.rs` + `appkit.rs` — the status-bar UI (`objc2`): *Add mount…*, mount a
+    connection, unmount a volume. All AppKit FFI stays in `appkit.rs`.
 
-  A connection-config UI (add/edit S3 endpoints) arrives with real connections —
-  nothing to configure while the only connection is the built-in demo.
+  `connection`/`keychain`/`s3check`/`mounts` are pure Rust + unit-tested.
 - **`xcode/`** — the non-Rust packaging: the ~8-line Swift `@main`
   `UnaryFileSystemExtension` bootstrap (returns the Rust class via
   `fskit_s3_make_filesystem`), bridging header, entitlements, and a build recipe.
@@ -140,20 +145,32 @@ entitlement generally needs a paid Apple Developer Program membership.
 
 ### Managing mounts (the app)
 
+`fskit-s3-app` is a ☁ status-bar app. **Add mount…** opens a form to create a
+connection — **In-memory** (the demo) or **S3** (endpoint/bucket/region/access-key
++ secret) — with *Save to Keychain*, *Mount when launching*, and *Test & Save*
+(validates S3 credentials by listing the bucket). Connections persist to
+`connections.json`; the menu mounts/unmounts them and auto-mounts the flagged ones
+at launch.
+
 There is **no bespoke CLI**: a connection is realised by the system `mount` tool
-with the connection's config as `-o` options, so the two ways to mount are the
-app and a plain `mount` command. Once the extension is installed and enabled:
+with its config as `-o` options, so the app and a plain `mount` do the same thing:
 
 ```bash
-cargo run -p fskit-s3-app               # the app: ☁ menu-bar item, Mount/Unmount per connection
-# …or the equivalent by hand (what the app runs under the hood):
-mount -F -t fskit-s3 ~/fskit-s3/.sources/demo ~/fskit-s3/demo
-umount ~/fskit-s3/demo
+cargo run -p fskit-s3-app                # the app
+# …or by hand (what the app runs — the memory demo needs no options):
+mount -F -t fskit-s3 ~/fskit-s3/.sources/memory ~/fskit-s3/memory
+umount ~/fskit-s3/memory
 ```
 
-Connections are **in-memory** for now (seeded from `Registry::with_defaults`);
-persisting a user-defined set (config file + Keychain secrets) is the same
-milestone that wires the real S3 backend and grows `mount_options` past empty.
+**How the secret travels.** FSKit exposes **no credential API** — a mount gets a
+resource + `FSTaskOptions` (`taskOptions` = the `-o` tokens) and nothing else. So
+config rides as `-o` options, and the extension resolves the **secret** as
+`Keychain[name]` (the secure default, via a shared keychain access group) **else**
+an `-o secret` (insecure, visible in `ps`/`mount`). The extension is a **headless**
+app extension and can't prompt, so the *app* prompts for a missing secret. The
+config file never stores the secret. Sharing the Keychain item needs a signed
+build + the `keychain-access-groups` entitlement on both targets (see
+`xcode/README.md`).
 
 ### Adding a storage backend (e.g. WebDAV)
 
@@ -165,8 +182,9 @@ milestone that wires the real S3 backend and grows `mount_options` past empty.
 ## Building & running the extension
 
 The `ext` crate compiles to a Rust `staticlib` linked into an Xcode ExtensionKit
-target. **It mounts and serves files today** on macOS 26 (the demo in-memory
-backend):
+target. **It mounts and serves files today** on macOS 26 — the in-memory demo for
+a `memory` connection, and a **real S3 bucket** for an S3 connection (config via
+`-o`, secret from the shared Keychain group):
 
 ```sh
 xcodegen generate                 # -> fskit-s3.xcodeproj (from project.yml)
@@ -208,8 +226,9 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   don't show up in `ls`.
 - Nuclear reset for accumulated daemon state: `sudo killall fskitd`.
 
-Next: wire the S3 backend + Keychain config in `loadResource` (currently the
-demo in-memory backend).
+Next: verify the S3 path end-to-end on a signed build (framework linking + reading
+the shared Keychain group from the `fskitd` sandbox); move the app's "Test & Save"
+network check off the main thread; add edit/remove to the connection UI.
 
 ## The Photos question (deferred)
 
