@@ -8,9 +8,10 @@
 //! returns the (cached, singleton) delegate instance.
 //!
 //! `loadResource` picks the backend from the mount's `-o` options (see
-//! [`backend_for`]): an S3 bucket for a named connection — with the secret read
-//! from the shared Keychain access group (else an `-o secret`) — or the
-//! credential-free in-memory demo for `memory`/unnamed mounts.
+//! [`backend_for`]), dispatching on an explicit `kind`: `kind=s3` ⇒ an S3 bucket
+//! (secret from the shared Keychain access group, else an `-o secret`),
+//! `kind=memory` ⇒ the in-memory demo. A missing `kind` fails the mount — the
+//! extension refuses to guess rather than silently serving the demo.
 
 #![allow(non_snake_case)]
 
@@ -94,7 +95,8 @@ define_class!(
             // fails the mount rather than silently serving the demo.
             let backend = match backend_for(options) {
                 Ok(backend) => backend,
-                Err(_) => {
+                Err(msg) => {
+                    log_line(&format!("loadResource failed: {msg}"));
                     let err = posix_error(libc::EINVAL);
                     reply.call((ptr::null_mut(), Retained::as_ptr(&err) as *mut NSError));
                     return;
@@ -153,23 +155,12 @@ impl FileSystem {
     }
 }
 
-/// The no-credential in-memory demo tree (served for the `memory` connection and
-/// when no connection is named). `debug` is the raw `taskOptions` we saw — exposed
-/// as `_fskit_debug.txt` so a mount that unexpectedly serves the demo reveals what
-/// FSKit actually delivered (TEMP diagnostic).
-fn demo_backend(debug: &[String]) -> Arc<dyn StorageBackend> {
+/// The no-credential in-memory demo tree (served only for the explicit `memory`
+/// connection).
+fn demo_backend() -> Arc<dyn StorageBackend> {
     let mut b = InMemoryBackend::new();
     b.insert("readme.txt", b"mounted by fskit-s3\n".to_vec())
-        .insert("photos/cover.png", vec![0u8; 32])
-        .insert(
-            "_fskit_debug.txt",
-            format!(
-                "taskOptions ({} tokens):\n{}\n",
-                debug.len(),
-                debug.join("\n")
-            )
-            .into_bytes(),
-        );
+        .insert("photos/cover.png", vec![0u8; 32]);
     Arc::new(b)
 }
 
@@ -177,20 +168,34 @@ fn demo_backend(debug: &[String]) -> Arc<dyn StorageBackend> {
 const KEYCHAIN_SERVICE: &str = "dev.lucsoft.fskit-s3";
 const KEYCHAIN_ACCESS_GROUP: &str = "H8563U643B.dev.lucsoft.fskit-s3";
 
-/// Choose the backend for a mount from its `-o` options.
+/// Choose the backend for a mount from its `-o` options, dispatching on the
+/// explicit `kind` the app always sends.
 ///
-/// `name` absent or `memory` ⇒ the demo. Otherwise an S3 bucket, with the secret
-/// resolved as `Keychain[name]` else the `-o secret` value. Returns `Err` (⇒ the
-/// mount fails) when a named S3 connection is missing required config or a secret,
-/// rather than silently serving the demo.
+/// `kind=memory` ⇒ the demo; `kind=s3` ⇒ an S3 bucket (secret from `Keychain[name]`
+/// else the `-o secret`). A **missing `kind`** is an error — we refuse to guess and
+/// never silently fall back to the demo, so a config/`-o`-delivery problem fails
+/// the mount loudly instead of masquerading as the demo.
 fn backend_for(options: &FSTaskOptions) -> Result<Arc<dyn StorageBackend>, String> {
     let raw = raw_task_options(options);
+    log_line(&format!(
+        "loadResource taskOptions ({}): {raw:?}",
+        raw.len()
+    ));
     let opts = parse_options(&raw);
-    let name = opts.get("name").map(String::as_str).unwrap_or("");
-    if name.is_empty() || name == "memory" {
-        return Ok(demo_backend(&raw));
-    }
 
+    match opts.get("kind").map(String::as_str) {
+        Some("memory") => Ok(demo_backend()),
+        Some("s3") => build_s3_backend(&opts),
+        Some(other) => Err(format!("unknown connection kind {other:?}")),
+        None => Err(format!(
+            "no connection kind in mount options — refusing to guess (taskOptions: {raw:?})"
+        )),
+    }
+}
+
+/// Build the S3 backend from the parsed `-o` options.
+fn build_s3_backend(opts: &HashMap<String, String>) -> Result<Arc<dyn StorageBackend>, String> {
+    let name = opts.get("name").map(String::as_str).unwrap_or("");
     let bucket = opts.get("bucket").cloned().unwrap_or_default();
     let access_key_id = opts.get("access_key_id").cloned().unwrap_or_default();
     if bucket.is_empty() || access_key_id.is_empty() {
@@ -258,6 +263,21 @@ fn posix_error(errno: i32) -> Retained<NSError> {
             None,
         )
     }
+}
+
+extern "C" {
+    fn NSLog(format: *const NSString, ...);
+}
+
+/// Log a line to the unified log (visible via `log stream` / Console), prefixed
+/// `[fskit-s3]`. The extension is headless, so this is how mount-time decisions
+/// (and failures) surface for debugging.
+fn log_line(message: &str) {
+    let format = NSString::from_str("[fskit-s3] %@");
+    let message = NSString::from_str(message);
+    // SAFETY: NSLog is a variadic C function; we call it with a `%@` format and a
+    // single `NSString *` argument, which matches. Both strings outlive the call.
+    unsafe { NSLog(Retained::as_ptr(&format), Retained::as_ptr(&message)) };
 }
 
 /// Force-register the Rust-defined FSKit classes with the Objective-C runtime.

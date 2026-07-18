@@ -90,17 +90,24 @@ impl Connection {
     }
 
     /// The `-o key=value` options handed to `mount` for this connection — its
-    /// non-secret config. Empty for [`ConnectionKind::Memory`]. The **secret** is
-    /// never included here; [`crate::mounts::mount`] appends `secret=…` for the
-    /// insecure path. `name` is included so the extension can key the Keychain.
+    /// non-secret config. Always carries an explicit `kind` (`memory` | `s3`) so
+    /// the extension dispatches unambiguously and **errors** on a mount with no
+    /// `kind` rather than silently serving the demo. `name` identifies the
+    /// connection (the extension's Keychain account for S3). The **secret** is
+    /// never included; [`crate::mounts::mount`] appends `secret=…` for the insecure
+    /// path.
     ///
     /// Values must not contain commas (the `-o` list delimiter) — true for
     /// endpoints/buckets/regions/keys; secrets go through the Keychain instead.
     pub fn mount_options(&self) -> Vec<(String, String)> {
         match &self.kind {
-            ConnectionKind::Memory => Vec::new(),
+            ConnectionKind::Memory => vec![
+                ("kind".to_string(), "memory".to_string()),
+                ("name".to_string(), self.name.clone()),
+            ],
             ConnectionKind::S3(s3) => {
                 let mut opts = vec![
+                    ("kind".to_string(), "s3".to_string()),
                     ("name".to_string(), self.name.clone()),
                     ("bucket".to_string(), s3.bucket.clone()),
                     ("access_key_id".to_string(), s3.access_key_id.clone()),
@@ -470,8 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn memory_needs_no_mount_options() {
-        assert!(Connection::memory().mount_options().is_empty());
+    fn memory_mount_options_carry_an_explicit_kind() {
+        let opts = Connection::memory().mount_options();
+        assert!(opts.contains(&("kind".to_string(), "memory".to_string())));
+        // No S3 config leaks into a memory mount.
+        assert!(!opts.iter().any(|(k, _)| k == "bucket" || k == "secret"));
     }
 
     #[test]

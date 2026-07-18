@@ -168,7 +168,7 @@ impl Controller {
         for c in Registry::load().list() {
             menu.addItem(&appkit::menu_item(
                 mtm,
-                &format!("Mount  {}  ({})", c.name, c.kind.label()),
+                &format!("Mount {}  ({})", c.name, c.kind.label()),
                 Some(sel!(mount:)),
                 Some(target),
                 Some(&c.name),
@@ -187,7 +187,7 @@ impl Controller {
             for m in &mounted {
                 menu.addItem(&appkit::menu_item(
                     mtm,
-                    &format!("Unmount  {}", m.mount_point),
+                    &format!("Unmount {}", m.mount_point),
                     Some(sel!(unmount:)),
                     Some(target),
                     Some(&m.mount_point),
