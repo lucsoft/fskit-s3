@@ -132,32 +132,54 @@ entitlement generally needs a paid Apple Developer Program membership.
 3. Route to it from the ext's config path. The trait, `core`, and the FSKit glue
    do not change.
 
-## Building the extension (needs full Xcode)
+## Building & running the extension
 
-The `ext` crate compiles to the Mach-O inside the `.appex`. A loadable module
-requires:
+The `ext` crate compiles to a Rust `staticlib` linked into an Xcode ExtensionKit
+target. **It mounts and serves files today** on macOS 26 (the demo in-memory
+backend):
 
-1. **Full Xcode** (App Store). This repo was scaffolded on a machine with only
-   Command Line Tools (`xcodebuild` absent); FSKit's extension-point plumbing and
-   valid `Info.plist`/entitlements come from Xcode's "File System Extension"
-   target. `bundle/*.plist` are best-effort templates to reconcile against it —
-   in particular confirm `NSExtensionPointIdentifier` (believed
-   `com.apple.fskit.fsmodule`) and that `NSExtensionPrincipalClass` matches the
-   ObjC runtime name of the `define_class!`'d type.
-2. A **codesigning identity** — `fskitd` refuses an improperly signed module
-   (ad-hoc may work for local dev).
-
-Then finish the `objc2` bindings in `ext/src/lib.rs` and assemble:
-
-```bash
-make -f bundle/Makefile SIGN_ID="-"   # ad-hoc, or a Developer ID
+```sh
+xcodegen generate                 # -> fskit-s3.xcodeproj (from project.yml)
+open fskit-s3.xcodeproj           # pick the BBN team, Build & Run the host app
+# System Settings ▸ Login Items & Extensions ▸ File System Extensions ▸ enable it
+mkdir -p /tmp/fskit-s3-src /tmp/fskit-s3
+mount -F -t fskit-s3 /tmp/fskit-s3-src /tmp/fskit-s3   # PathURL resource arg
+ls /tmp/fskit-s3                  # -> photos/  readme.txt
+cat /tmp/fskit-s3/readme.txt      # -> mounted by fskit-s3
 ```
 
-The module appears in **System Settings ▸ General ▸ Login Items & Extensions ▸
-File System Extensions** and mounts via `mount -F -t fskit-s3 …`.
+Faster iteration without opening Xcode: `xcodebuild -scheme fskit-s3-host
+-allowProvisioningUpdates build`, copy the `.app` to `/Applications`, then
+`pluginkit -a <appex>` + `pluginkit -e use -i dev.lucsoft.fskit-s3.ext`.
 
-First real milestone: mount the **demo in-memory volume** (no credentials) to
-prove the FSKit plumbing before wiring S3 config + Keychain.
+Requires: full Xcode; the restricted `com.apple.developer.fskit.fsmodule`
+entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
+
+### FSKit runtime gotchas (each cost hours — don't relearn them)
+
+- **Info.plist**: the `FS*` keys go INSIDE `EXAppExtensionAttributes`, not top
+  level. A *complete* module also declares `FSPersonalities`, `FSMediaTypes`, and
+  `FSActivate/Check/FormatOptionSyntax`, or `fskit_agent` won't return it to
+  `mount` ("No extension with fsShortName found"). Device-less FS →
+  `FSSupportsPathURLs = true` (the `mount` resource arg is a path).
+- **`ENABLE_DEBUG_DYLIB = NO`**: Xcode 16's stub-executor breaks system-launched
+  app extensions.
+- **`containerStatus`**: `loadResource` MUST set it to `ready`
+  (`FSContainerStatus.ready`) or FSKit rejects with "unexpected container state"
+  (POSIX 35). `unloadResource` sets it back to `notReady` so remounts start clean.
+- **Singleton delegate**: the Swift `@main` reads `fileSystem` repeatedly, so
+  `fskit_s3_make_filesystem` returns one cached instance (else duplicate
+  containers register).
+- **Stable container UUID** across probe calls (random → two containers/resource).
+- **Ownership**: objects FSKit keeps past the reply (the volume from `load`,
+  items from `activate`/`lookup`) must be `Retained::into_raw`'d — a borrowed
+  pointer dangles and crashes the extension.
+- **`enumerate`**: pack `FSItemAttributes` inline in `packEntry`, or entries
+  don't show up in `ls`.
+- Nuclear reset for accumulated daemon state: `sudo killall fskitd`.
+
+Next: wire the S3 backend + Keychain config in `loadResource` (currently the
+demo in-memory backend).
 
 ## The Photos question (deferred)
 
