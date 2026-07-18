@@ -1,0 +1,66 @@
+# xcodegen manifest for the FSKit extension packaging.
+#
+#   brew install xcodegen   # already installed
+#   xcodegen generate       # -> fskit-s3.xcodeproj
+#   open fskit-s3.xcodeproj # pick the BBN team, Build & Run
+#
+# The Rust `ext` staticlib holds all logic; this project is only the ExtensionKit
+# host app + extension target + the Swift @main bootstrap, signed by the BBN team.
+
+name: fskit-s3
+
+options:
+  bundleIdPrefix: dev.lucsoft.fskit-s3
+  deploymentTarget:
+    macOS: "15.4"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: H8563U643B
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  # -- Host app: a shell that carries the extension. --
+  fskit-s3-host:
+    type: application
+    platform: macOS
+    sources:
+      - xcode/host
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.lucsoft.fskit-s3
+        PRODUCT_NAME: fskit-s3
+        CODE_SIGN_ENTITLEMENTS: xcode/App.entitlements
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_LSUIElement: "YES"
+    dependencies:
+      - target: fskit-s3-ext
+        embed: true
+
+  # -- FSKit extension: Swift @main bootstrap + the Rust staticlib. --
+  fskit-s3-ext:
+    type: extensionkit-extension
+    platform: macOS
+    sources:
+      - xcode/FileSystemExtension.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.lucsoft.fskit-s3.ext
+        PRODUCT_NAME: fskit-s3-ext
+        INFOPLIST_FILE: xcode/Extension-Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+        CODE_SIGN_ENTITLEMENTS: xcode/Extension.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: xcode/Extension-Bridging-Header.h
+        # Link the Rust staticlib (built by the pre-build script below).
+        OTHER_LDFLAGS: "-L$(BUILT_PRODUCTS_DIR) -lfskit_s3_ext"
+    preBuildScripts:
+      - name: "Build Rust staticlib (fskit-s3-ext)"
+        script: '"$PROJECT_DIR/scripts/build-ext-staticlib.sh"'
+        basedOnDependencyAnalysis: false
+    dependencies:
+      - sdk: FSKit.framework
+      - sdk: ExtensionFoundation.framework

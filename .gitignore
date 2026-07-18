@@ -2,3 +2,5 @@
 /build
 Cargo.lock
 .DS_Store
+# xcodegen output — regenerate with `xcodegen generate`
+/fskit-s3.xcodeproj
