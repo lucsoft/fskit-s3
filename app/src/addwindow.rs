@@ -15,7 +15,7 @@ use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThr
 use objc2_app_kit::{NSButton, NSPopUpButton, NSSecureTextField, NSTextField, NSView, NSWindow};
 
 use crate::appkit;
-use crate::connection::{Connection, ConnectionKind, Registry, S3Meta};
+use crate::connection::{Connection, ConnectionKind, FormInput, Registry};
 
 // Keeps the live window controller retained for as long as the window is open
 // (main-thread only). Replaced — and the previous one dropped — on the next open.
@@ -84,72 +84,64 @@ impl AddWindowController {
         appkit::set_window_content_size(&iv.window, WINDOW_W, height);
     }
 
-    /// Validate (S3), persist the connection + secret, and close on success.
+    /// Validate the form, run the live S3 check, persist, and close on success.
     fn on_save(&self) {
         let iv = self.ivars();
-        let status = |msg: &str| appkit::set_string(&iv.status, msg);
+        let set_status = |msg: &str| appkit::set_string(&iv.status, msg);
 
-        let name = appkit::field_string(&iv.name).trim().to_string();
-        if name.is_empty() {
-            status("Name is required.");
-            return;
-        }
-        let mount_on_launch = appkit::checkbox_on(&iv.mount_launch);
-        let is_s3 = appkit::popup_index(&iv.type_popup) == 1;
+        let input = FormInput {
+            name: appkit::field_string(&iv.name),
+            is_s3: appkit::popup_index(&iv.type_popup) == 1,
+            endpoint: appkit::field_string(&iv.endpoint),
+            bucket: appkit::field_string(&iv.bucket),
+            region: appkit::field_string(&iv.region),
+            access_key_id: appkit::field_string(&iv.akid),
+            secret: appkit::field_string(&iv.secret),
+            session_token: appkit::field_string(&iv.token),
+            save_secret_to_keychain: appkit::checkbox_on(&iv.save_keychain),
+            mount_on_launch: appkit::checkbox_on(&iv.mount_launch),
+        };
+        // Keep what the live check + Keychain need after `from_form` consumes `input`.
+        let secret = input.secret.clone();
+        let save_keychain = input.save_secret_to_keychain;
 
-        let conn = if is_s3 {
-            let token = appkit::field_string(&iv.token).trim().to_string();
-            let meta = S3Meta {
-                bucket: appkit::field_string(&iv.bucket).trim().to_string(),
-                region: appkit::field_string(&iv.region).trim().to_string(),
-                endpoint: appkit::field_string(&iv.endpoint).trim().to_string(),
-                access_key_id: appkit::field_string(&iv.akid).trim().to_string(),
-                session_token: (!token.is_empty()).then_some(token),
-            };
-            let secret = appkit::field_string(&iv.secret);
-            if meta.bucket.is_empty() || meta.access_key_id.is_empty() || secret.is_empty() {
-                status("Bucket, access key, and secret are required.");
+        let conn = match Connection::from_form(input) {
+            Ok(conn) => conn,
+            Err(e) => {
+                set_status(&e);
                 return;
-            }
-            // NOTE: runs the network check synchronously, so the UI briefly blocks
-            // (fine for a local endpoint; a background thread is a later refinement).
-            if let Err(e) = crate::s3check::test_s3(&meta, &secret) {
-                status(&format!("Test failed: {e}"));
-                return;
-            }
-            let save_keychain = appkit::checkbox_on(&iv.save_keychain);
-            if save_keychain {
-                if let Err(e) = crate::keychain::store_secret(&name, &secret) {
-                    status(&format!("Keychain save failed: {e}"));
-                    return;
-                }
-            }
-            Connection {
-                name: name.clone(),
-                kind: ConnectionKind::S3(meta),
-                save_secret_to_keychain: save_keychain,
-                mount_on_launch,
-            }
-        } else {
-            Connection {
-                name: name.clone(),
-                kind: ConnectionKind::Memory,
-                save_secret_to_keychain: false,
-                mount_on_launch,
             }
         };
 
+        if let ConnectionKind::S3(meta) = &conn.kind {
+            // NOTE: synchronous network check — the UI briefly blocks (fine for a
+            // local endpoint; a background thread is a later refinement).
+            if let Err(e) = crate::s3check::test_s3(meta, &secret) {
+                set_status(&format!("Couldn't reach the bucket: {e}"));
+                return;
+            }
+            if save_keychain {
+                if let Err(e) = crate::keychain::store_secret(&conn.name, &secret) {
+                    set_status(&format!("Keychain save failed: {e}"));
+                    return;
+                }
+            }
+        }
+
         let mut registry = Registry::load();
-        if registry.get(&name).is_some() {
-            status(&format!("A connection named {name:?} already exists."));
+        if registry.get(&conn.name).is_some() {
+            set_status(&format!(
+                "A connection named {:?} already exists.",
+                conn.name
+            ));
             return;
         }
         if let Err(e) = registry.add(conn) {
-            status(&e);
+            set_status(&e);
             return;
         }
         if let Err(e) = registry.save() {
-            status(&format!("Save failed: {e}"));
+            set_status(&format!("Save failed: {e}"));
             return;
         }
         appkit::close_window(&iv.window);

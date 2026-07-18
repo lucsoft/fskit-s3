@@ -233,6 +233,8 @@ fn main() {
 
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    // Give text fields the standard ⌘X/C/V/A (needs a main menu, even hidden).
+    appkit::install_edit_menu(mtm);
 
     let status_item =
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);

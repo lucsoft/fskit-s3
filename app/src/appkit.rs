@@ -8,7 +8,7 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::{sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSControl,
     NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton, NSSecureTextField,
@@ -87,6 +87,45 @@ pub fn set_status_title(item: &NSStatusItem, title: &str, mtm: MainThreadMarker)
     if let Some(button) = item.button(mtm) {
         button.setTitle(&NSString::from_str(title));
     }
+}
+
+/// Install a main menu with an **Edit** submenu (Cut/Copy/Paste/Select All) so
+/// standard editing shortcuts (⌘X/C/V/A) reach the focused text field.
+///
+/// Without a main menu, an `Accessory` app never routes those key equivalents to
+/// the first responder — so text fields can't be pasted into. The items target
+/// `nil` (the first responder), whose field editor implements the selectors. The
+/// menu bar isn't shown for an accessory app, but its key equivalents still fire.
+pub fn install_edit_menu(mtm: MainThreadMarker) {
+    let edit = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Edit"));
+    edit.addItem(&responder_item(mtm, "Cut", sel!(cut:), "x"));
+    edit.addItem(&responder_item(mtm, "Copy", sel!(copy:), "c"));
+    edit.addItem(&responder_item(mtm, "Paste", sel!(paste:), "v"));
+    edit.addItem(&responder_item(mtm, "Select All", sel!(selectAll:), "a"));
+
+    let edit_item = NSMenuItem::new(mtm);
+    edit_item.setSubmenu(Some(&edit));
+
+    let main = NSMenu::new(mtm);
+    main.addItem(&edit_item);
+    NSApplication::sharedApplication(mtm).setMainMenu(Some(&main));
+}
+
+/// A menu item bound to `action` with a ⌘-`key` equivalent, targeting the first
+/// responder (target stays nil) — the pattern for standard editing selectors.
+fn responder_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: Sel,
+    key: &str,
+) -> Retained<NSMenuItem> {
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(title));
+    // SAFETY: `action` is a compile-time selector; leaving the target nil routes it
+    // up the responder chain (NSMenuItem's default modifier is ⌘).
+    unsafe { item.setAction(Some(action)) };
+    item.setKeyEquivalent(&NSString::from_str(key));
+    item
 }
 
 // --- Window + form controls (for the Add-mount window) ---------------------

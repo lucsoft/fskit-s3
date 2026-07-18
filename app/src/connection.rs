@@ -118,6 +118,112 @@ impl Connection {
             }
         }
     }
+
+    /// Validate raw Add-mount form values into a `Connection`, with a specific,
+    /// human-readable error naming the offending field. Pure (no I/O, no network) —
+    /// the caller runs the live credential check separately.
+    pub fn from_form(input: FormInput) -> Result<Connection, String> {
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err("Name is required.".to_string());
+        }
+        // `name` is a path component (mount point), a Keychain account, and an
+        // `-o` value, so it can't contain a slash or the `-o` comma delimiter.
+        if name.contains('/') {
+            return Err("Name can't contain a slash.".to_string());
+        }
+        if name.contains(',') {
+            return Err("Name can't contain a comma.".to_string());
+        }
+
+        if !input.is_s3 {
+            return Ok(Connection {
+                name: name.to_string(),
+                kind: ConnectionKind::Memory,
+                save_secret_to_keychain: false,
+                mount_on_launch: input.mount_on_launch,
+            });
+        }
+
+        let bucket = input.bucket.trim();
+        let region = input.region.trim();
+        let endpoint = input.endpoint.trim();
+        let access_key_id = input.access_key_id.trim();
+        let session_token = input.session_token.trim();
+        let secret = input.secret.as_str(); // not trimmed — secrets may have edge whitespace
+
+        if bucket.is_empty() {
+            return Err("Bucket is required for an S3 connection.".to_string());
+        }
+        if access_key_id.is_empty() {
+            return Err("Access Key ID is required for an S3 connection.".to_string());
+        }
+        if secret.is_empty() {
+            return Err("Secret Access Key is required for an S3 connection.".to_string());
+        }
+        if !endpoint.is_empty() {
+            validate_endpoint(endpoint)?;
+        }
+        // Everything that rides the `-o` option string must avoid its comma delimiter.
+        for (label, value) in [
+            ("Bucket", bucket),
+            ("Region", region),
+            ("Access Key ID", access_key_id),
+            ("Session token", session_token),
+        ] {
+            if value.contains(',') {
+                return Err(format!("{label} can't contain a comma."));
+            }
+        }
+        // The secret rides `-o` only when it isn't saved to the Keychain.
+        if !input.save_secret_to_keychain && secret.contains(',') {
+            return Err(
+                "Secret can't contain a comma unless it's saved to the Keychain.".to_string(),
+            );
+        }
+
+        Ok(Connection {
+            name: name.to_string(),
+            kind: ConnectionKind::S3(S3Meta {
+                bucket: bucket.to_string(),
+                region: region.to_string(),
+                endpoint: endpoint.to_string(),
+                access_key_id: access_key_id.to_string(),
+                session_token: (!session_token.is_empty()).then(|| session_token.to_string()),
+            }),
+            save_secret_to_keychain: input.save_secret_to_keychain,
+            mount_on_launch: input.mount_on_launch,
+        })
+    }
+}
+
+/// Raw values from the Add-mount form, validated by [`Connection::from_form`].
+pub struct FormInput {
+    pub name: String,
+    pub is_s3: bool,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret: String,
+    pub session_token: String,
+    pub save_secret_to_keychain: bool,
+    pub mount_on_launch: bool,
+}
+
+/// An S3 endpoint must be an `http`/`https` URL with a host.
+fn validate_endpoint(endpoint: &str) -> Result<(), String> {
+    let url = url::Url::parse(endpoint).map_err(|_| {
+        format!("Endpoint {endpoint:?} isn't a valid URL (e.g. https://s3.amazonaws.com).")
+    })?;
+    match url.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("Endpoint scheme {other:?} must be http or https.")),
+    }
+    if url.host_str().unwrap_or("").is_empty() {
+        return Err("Endpoint must include a host (e.g. https://s3.amazonaws.com).".to_string());
+    }
+    Ok(())
 }
 
 /// A set of connections keyed by unique name, persisted to an app-local file.
@@ -244,6 +350,104 @@ mod tests {
             save_secret_to_keychain: true,
             mount_on_launch: false,
         }
+    }
+
+    /// A valid S3 form (secret saved to Keychain), tweakable per test.
+    fn s3_form() -> FormInput {
+        FormInput {
+            name: "photos".to_string(),
+            is_s3: true,
+            endpoint: "http://localhost:9000".to_string(),
+            bucket: "my-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            access_key_id: "AKIA".to_string(),
+            secret: "s3cr3t".to_string(),
+            session_token: String::new(),
+            save_secret_to_keychain: true,
+            mount_on_launch: false,
+        }
+    }
+
+    #[test]
+    fn from_form_accepts_valid_memory_and_s3() {
+        let mem = Connection::from_form(FormInput {
+            name: "  local  ".to_string(),
+            is_s3: false,
+            ..s3_form()
+        })
+        .unwrap();
+        assert_eq!(mem.name, "local"); // trimmed
+        assert_eq!(mem.kind, ConnectionKind::Memory);
+
+        let s3 = Connection::from_form(s3_form()).unwrap();
+        assert!(s3.is_s3());
+        assert!(s3.save_secret_to_keychain);
+    }
+
+    #[test]
+    fn from_form_rejects_bad_names() {
+        let err = |name: &str| {
+            Connection::from_form(FormInput {
+                name: name.to_string(),
+                ..s3_form()
+            })
+            .unwrap_err()
+        };
+        assert!(err("").contains("required"));
+        assert!(err("a/b").contains("slash"));
+        assert!(err("a,b").contains("comma"));
+    }
+
+    #[test]
+    fn from_form_requires_s3_essentials() {
+        let missing = |f: fn(&mut FormInput)| {
+            let mut form = s3_form();
+            f(&mut form);
+            Connection::from_form(form).unwrap_err()
+        };
+        assert!(missing(|f| f.bucket = String::new()).contains("Bucket"));
+        assert!(missing(|f| f.access_key_id = String::new()).contains("Access Key"));
+        assert!(missing(|f| f.secret = String::new()).contains("Secret"));
+    }
+
+    #[test]
+    fn from_form_validates_endpoint_url() {
+        let with_endpoint = |ep: &str| {
+            Connection::from_form(FormInput {
+                endpoint: ep.to_string(),
+                ..s3_form()
+            })
+        };
+        assert!(with_endpoint("").is_ok()); // empty ⇒ AWS default
+        assert!(with_endpoint("https://s3.amazonaws.com").is_ok());
+        assert!(with_endpoint("not a url")
+            .unwrap_err()
+            .contains("valid URL"));
+        assert!(with_endpoint("ftp://host").unwrap_err().contains("http"));
+    }
+
+    #[test]
+    fn from_form_rejects_commas_in_o_fields() {
+        assert!(Connection::from_form(FormInput {
+            bucket: "a,b".to_string(),
+            ..s3_form()
+        })
+        .unwrap_err()
+        .contains("comma"));
+        // A secret with a comma is fine when it goes to the Keychain, not `-o`.
+        assert!(Connection::from_form(FormInput {
+            secret: "se,cret".to_string(),
+            save_secret_to_keychain: true,
+            ..s3_form()
+        })
+        .is_ok());
+        assert!(Connection::from_form(FormInput {
+            secret: "se,cret".to_string(),
+            save_secret_to_keychain: false,
+            ..s3_form()
+        })
+        .unwrap_err()
+        .contains("comma"));
     }
 
     #[test]
