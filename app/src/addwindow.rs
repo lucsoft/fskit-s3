@@ -232,7 +232,7 @@ pub fn open(mtm: MainThreadMarker) {
     // Always-visible options + status + buttons (pinned to the bottom edge).
     let mount_launch = appkit::checkbox(
         mtm,
-        appkit::rect(150.0, 118.0, 210.0, 20.0),
+        appkit::rect(150.0, 100.0, 210.0, 20.0),
         "Mount when launching",
     );
     add_bottom(&mount_launch);
