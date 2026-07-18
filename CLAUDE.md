@@ -117,10 +117,12 @@ prefix).
     `fskit-s3-backend`/OpenDAL, the same backend the extension serves with).
   - `mounts.rs` — the mount table + `mount`/`unmount` (`mount -F -t fskit-s3
     [-o …]`). No bespoke CLI — the system `mount`/`umount` are that.
-  - `addwindow.rs` — the Add-mount form + the secret-prompt window (native
-    `NSWindow`).
-  - `main.rs` + `appkit.rs` — the status-bar UI (`objc2`): *Add mount…*, mount a
-    connection, unmount a volume. All AppKit FFI stays in `appkit.rs`.
+  - `addwindow.rs` — the connection form (`open` = new, `open_edit` = edit an
+    existing connection, pre-filled + name locked, with a red *Delete* button that
+    removes it after a confirmation) + the secret-prompt window (native `NSWindow`).
+  - `main.rs` + `appkit.rs` — the status-bar UI (`objc2`): *New Connection…* plus a
+    submenu per connection (a green/grey status dot + *Mount*/*Unmount* toggle +
+    *Update…*). All AppKit FFI stays in `appkit.rs`.
 
   `connection`/`keychain`/`s3check`/`mounts` are pure Rust + unit-tested.
 - **`xcode/`** — the non-Rust packaging: the Swift `@main`
@@ -242,7 +244,8 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
 
 Next: verify the S3 path end-to-end on a signed build (framework linking + reading
 the shared Keychain group from the `fskitd` sandbox); move the app's "Test & Save"
-network check off the main thread; add edit/remove to the connection UI.
+network check off the main thread. (Connection edit + delete are done — each
+connection's submenu has *Update…*, and the edit form has a red *Delete* button.)
 
 ## The Photos question (deferred)
 

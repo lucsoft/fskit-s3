@@ -1,10 +1,11 @@
 //! `fskit-s3-app` — the macOS app for managing fskit-s3 connections and mounts.
 //!
-//! A status-bar app whose dropdown offers *Add mount…*, lists the configured
-//! **connections** (each with a *Mount* action) and the currently mounted
-//! **volumes** (each with an *Unmount* action), plus *Quit*. The menu rebuilds
-//! itself on every open (via the `NSMenuDelegate` hook) and reloads the registry
-//! from disk, so it's always current. It owns the whole stack:
+//! A status-bar app whose dropdown offers *New Connection…*, lists the configured
+//! **connections** — each a submenu carrying a *Mount*/*Unmount* toggle and an
+//! *Update…* action, with a status dot (green when mounted, grey when not) — plus
+//! *Quit*. The menu rebuilds itself on every open (via the `NSMenuDelegate` hook)
+//! and reloads the registry from disk, so it's always current. It owns the whole
+//! stack:
 //!
 //! - [`connection`] — the `Connection`/`ConnectionKind` (`Memory` / `S3`) model +
 //!   the persisted `Registry` (`connections.json`, never holding a secret).
@@ -92,19 +93,16 @@ define_class!(
             }
         }
 
-        #[unsafe(method(removeConnection:))]
-        fn remove_connection_action(&self, sender: Option<&NSMenuItem>) {
+        #[unsafe(method(update:))]
+        fn update_action(&self, sender: Option<&NSMenuItem>) {
             let Some(item) = sender else { return };
             let Some(name) = appkit::represented_string(item) else {
                 return;
             };
-            let mut registry = Registry::load();
-            if registry.remove(&name) {
-                if let Err(e) = registry.save() {
-                    eprintln!("[app] remove {name} failed: {e}");
-                    return;
-                }
-                keychain::delete_secret(&name);
+            let registry = Registry::load();
+            let Some(conn) = registry.get(&name) else { return };
+            if let Some(mtm) = MainThreadMarker::new() {
+                addwindow::open_edit(mtm, conn.clone());
             }
         }
 
@@ -171,8 +169,9 @@ impl Controller {
         ));
         menu.addItem(&appkit::separator(mtm));
 
-        // Connections — each mountable. Reloaded from disk so the Add-mount window's
-        // changes show up immediately.
+        // Connections — each a dropdown with a Mount/Unmount toggle and an Update
+        // action, prefixed with a status dot (green when mounted, grey when not).
+        // Reloaded from disk so the Add/Edit window's changes show up immediately.
         menu.addItem(&appkit::menu_item(
             mtm,
             "Connections",
@@ -181,55 +180,52 @@ impl Controller {
             None,
             false,
         ));
+        let mounted = mounts::list_fskit();
         for c in Registry::load().list() {
-            // Each connection is a submenu of Mount / Remove.
+            let mount_point = c.default_mount_point();
+            let mount_point = mount_point.to_string_lossy();
+            let is_mounted = mounted.iter().any(|m| m.mount_point == *mount_point);
+            let dot = if is_mounted { "🟢" } else { "⚪️" };
+
             let submenu = appkit::menu(mtm);
+            if is_mounted {
+                submenu.addItem(&appkit::menu_item(
+                    mtm,
+                    "Unmount",
+                    Some(sel!(unmount:)),
+                    Some(target),
+                    Some(&mount_point),
+                    true,
+                ));
+            } else {
+                submenu.addItem(&appkit::menu_item(
+                    mtm,
+                    "Mount",
+                    Some(sel!(mount:)),
+                    Some(target),
+                    Some(&c.name),
+                    true,
+                ));
+            }
             submenu.addItem(&appkit::menu_item(
                 mtm,
-                "Mount",
-                Some(sel!(mount:)),
+                "Update…",
+                Some(sel!(update:)),
                 Some(target),
                 Some(&c.name),
                 true,
             ));
-            submenu.addItem(&appkit::menu_item(
+
+            let row = appkit::menu_item(
                 mtm,
-                "Remove",
-                Some(sel!(removeConnection:)),
-                Some(target),
-                Some(&c.name),
-                true,
-            ));
-            let item = appkit::menu_item(
-                mtm,
-                &format!("{}  ({})", c.name, c.kind.label()),
+                &format!("{dot}  {}  ({})", c.name, c.kind.label()),
                 None,
                 None,
                 None,
                 true,
             );
-            appkit::set_submenu(&item, &submenu);
-            menu.addItem(&item);
-        }
-
-        menu.addItem(&appkit::separator(mtm));
-
-        // Active mounts — each unmountable.
-        menu.addItem(&appkit::menu_item(mtm, "Mounted", None, None, None, false));
-        let mounted = mounts::list_fskit();
-        if mounted.is_empty() {
-            menu.addItem(&appkit::menu_item(mtm, "None", None, None, None, false));
-        } else {
-            for m in &mounted {
-                menu.addItem(&appkit::menu_item(
-                    mtm,
-                    &format!("Unmount {}", m.mount_point),
-                    Some(sel!(unmount:)),
-                    Some(target),
-                    Some(&m.mount_point),
-                    true,
-                ));
-            }
+            appkit::set_submenu(&row, &submenu);
+            menu.addItem(&row);
         }
 
         menu.addItem(&appkit::separator(mtm));

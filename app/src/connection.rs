@@ -309,7 +309,8 @@ impl Registry {
         Ok(())
     }
 
-    /// Remove the named connection; returns whether one was removed.
+    /// Remove the named connection; returns whether one was removed. Used by the
+    /// Edit flow to replace an entry in place.
     pub fn remove(&mut self, name: &str) -> bool {
         let before = self.connections.len();
         self.connections.retain(|c| c.name != name);

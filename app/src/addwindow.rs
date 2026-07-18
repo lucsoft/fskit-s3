@@ -1,11 +1,16 @@
-//! The "Add mount" window — create a connection (In-memory or S3).
+//! The connection window — create a connection ([`open`]) or edit an existing one
+//! ([`open_edit`]), In-memory or S3.
 //!
 //! A native `NSWindow` form built via [`crate::appkit`] (all FFI stays there).
 //! On **Test & Save** an S3 connection's credentials are validated by listing the
 //! bucket ([`crate::s3check`]); on success the connection is persisted and, when
 //! "Save secret to Keychain" is checked, the secret is stored via
-//! [`crate::keychain`]. The menu picks up the new connection on its next open
-//! (it reloads the registry from disk).
+//! [`crate::keychain`]. When editing, the fields are pre-filled (the secret from
+//! the Keychain) and the name is locked — it's the registry key, so on save the
+//! previous entry is replaced in place; a red **Delete** button (shown only when
+//! editing) unmounts the connection if mounted, then removes it and its secret,
+//! after a confirmation. The menu picks up the change on its next open (it reloads
+//! the registry from disk).
 
 use std::cell::RefCell;
 
@@ -38,6 +43,10 @@ struct AddIvars {
     save_keychain: Retained<NSButton>,
     mount_launch: Retained<NSButton>,
     status: Retained<NSTextField>,
+    /// The name of the connection being edited, or `None` when creating a new one.
+    /// In edit mode the name field is locked to this, so it doubles as the registry
+    /// key to replace on save.
+    original_name: Option<String>,
 }
 
 define_class!(
@@ -56,6 +65,11 @@ define_class!(
         #[unsafe(method(testAndSave:))]
         fn test_and_save(&self, _sender: Option<&AnyObject>) {
             self.on_save();
+        }
+
+        #[unsafe(method(delete:))]
+        fn delete(&self, _sender: Option<&AnyObject>) {
+            self.on_delete();
         }
 
         #[unsafe(method(cancel:))]
@@ -129,12 +143,22 @@ impl AddWindowController {
         }
 
         let mut registry = Registry::load();
-        if registry.get(&conn.name).is_some() {
-            set_status(&format!(
-                "A connection named {:?} already exists.",
-                conn.name
-            ));
-            return;
+        match &iv.original_name {
+            // Editing: drop the previous entry (the name is locked, so it matches)
+            // and re-add the updated one in its place.
+            Some(orig) => {
+                registry.remove(orig);
+            }
+            // Creating: the name must be free.
+            None => {
+                if registry.get(&conn.name).is_some() {
+                    set_status(&format!(
+                        "A connection named {:?} already exists.",
+                        conn.name
+                    ));
+                    return;
+                }
+            }
         }
         if let Err(e) = registry.add(conn) {
             set_status(&e);
@@ -146,6 +170,53 @@ impl AddWindowController {
         }
         appkit::close_window(&iv.window);
     }
+
+    /// Delete the connection being edited (after a confirmation): unmount it if
+    /// mounted, then drop it from the registry and its secret from the Keychain, and
+    /// close. A no-op when creating a new connection (the Delete button isn't shown
+    /// then). If the unmount fails (e.g. the volume is busy) the delete is aborted
+    /// so we never orphan a live mount whose config is gone.
+    fn on_delete(&self) {
+        let iv = self.ivars();
+        let Some(name) = iv.original_name.clone() else {
+            return;
+        };
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        if !appkit::confirm(
+            mtm,
+            &format!("Delete the connection “{name}”?"),
+            "This unmounts it if mounted, then removes its configuration and stored secret. This can't be undone.",
+            "Delete",
+        ) {
+            return;
+        }
+
+        let mut registry = Registry::load();
+        // Unmount first if currently mounted at its default point; abort on failure.
+        if let Some(conn) = registry.get(&name) {
+            let mount_point = conn.default_mount_point();
+            let mount_point = mount_point.to_string_lossy();
+            let mounted = crate::mounts::list_fskit()
+                .iter()
+                .any(|m| m.mount_point == *mount_point);
+            if mounted {
+                if let Err(e) = crate::mounts::unmount(&mount_point) {
+                    appkit::set_string(&iv.status, &format!("Couldn't unmount: {e}"));
+                    return;
+                }
+            }
+        }
+
+        registry.remove(&name);
+        if let Err(e) = registry.save() {
+            appkit::set_string(&iv.status, &format!("Delete failed: {e}"));
+            return;
+        }
+        crate::keychain::delete_secret(&name);
+        appkit::close_window(&iv.window);
+    }
 }
 
 /// Window content width, and the two heights the form toggles between (S3 fields
@@ -155,11 +226,66 @@ const WINDOW_W: f64 = 380.0;
 const WINDOW_H_S3: f64 = 440.0;
 const WINDOW_H_MEMORY: f64 = 240.0;
 
-/// Open the Add-mount window (replacing any previous one). Controls are laid out
-/// for the tall (S3) height; `update_visibility` shrinks to the memory height for
-/// the default In-memory selection before the window is shown.
+/// Open the form to create a new connection.
 pub fn open(mtm: MainThreadMarker) {
-    let window = appkit::make_window(mtm, WINDOW_W, WINDOW_H_S3, "New Connection");
+    open_form(mtm, None);
+}
+
+/// Open the form pre-filled to edit an existing connection. The name is locked
+/// (it's the registry key), and the S3 secret is pre-loaded from the Keychain when
+/// available so the live check + re-save work without re-entering it.
+pub fn open_edit(mtm: MainThreadMarker, connection: Connection) {
+    open_form(mtm, Some(connection));
+}
+
+/// Build and show the connection form. With `existing` it edits that connection
+/// (fields pre-filled, name locked); without it, it creates a new one. Controls
+/// are laid out for the tall (S3) height; `update_visibility` shrinks to the memory
+/// height for the In-memory selection before the window is shown.
+fn open_form(mtm: MainThreadMarker, existing: Option<Connection>) {
+    // Initial field values (empty for a new connection).
+    let s3_meta = existing.as_ref().and_then(|c| match &c.kind {
+        ConnectionKind::S3(m) => Some(m.clone()),
+        ConnectionKind::Memory => None,
+    });
+    let init_name = existing
+        .as_ref()
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
+    let is_s3_init = s3_meta.is_some();
+    let init = |f: fn(&crate::connection::S3Meta) -> &str| {
+        s3_meta.as_ref().map(f).unwrap_or("").to_string()
+    };
+    let init_endpoint = init(|m| &m.endpoint);
+    let init_bucket = init(|m| &m.bucket);
+    let init_region = init(|m| &m.region);
+    let init_akid = init(|m| &m.access_key_id);
+    let init_token = s3_meta
+        .as_ref()
+        .and_then(|m| m.session_token.clone())
+        .unwrap_or_default();
+    // Pre-load the stored secret so editing an S3 connection needn't re-type it.
+    let init_secret = existing
+        .as_ref()
+        .filter(|c| c.is_s3())
+        .and_then(|c| crate::keychain::read_secret(&c.name))
+        .unwrap_or_default();
+    let init_save_keychain = existing
+        .as_ref()
+        .map(|c| c.save_secret_to_keychain)
+        .unwrap_or(false);
+    let init_mount_launch = existing
+        .as_ref()
+        .map(|c| c.mount_on_launch)
+        .unwrap_or(false);
+    let original_name = existing.as_ref().map(|c| c.name.clone());
+
+    let title = if existing.is_some() {
+        "Edit Connection"
+    } else {
+        "New Connection"
+    };
+    let window = appkit::make_window(mtm, WINDOW_W, WINDOW_H_S3, title);
     let Some(content) = appkit::content_view(&window) else {
         return;
     };
@@ -173,13 +299,16 @@ pub fn open(mtm: MainThreadMarker) {
         appkit::add_subview(&content, v);
     };
 
-    // Name.
+    // Name (locked when editing — it's the registry key).
     add_top(&appkit::label(
         mtm,
         appkit::rect(20.0, 400.0, 120.0, 20.0),
         "Name",
     ));
-    let name = appkit::text_field(mtm, appkit::rect(150.0, 398.0, 210.0, 22.0), "");
+    let name = appkit::text_field(mtm, appkit::rect(150.0, 398.0, 210.0, 22.0), &init_name);
+    if original_name.is_some() {
+        appkit::set_editable(&name, false);
+    }
     add_top(&name);
 
     // Type selector.
@@ -193,11 +322,12 @@ pub fn open(mtm: MainThreadMarker) {
         appkit::rect(150.0, 364.0, 210.0, 26.0),
         &["In-memory", "S3"],
     );
+    appkit::select_popup_index(&type_popup, if is_s3_init { 1 } else { 0 });
     add_top(&type_popup);
 
     // S3 fields, grouped in a box so the whole group toggles + moves at once.
     let s3_box = appkit::plain_view(mtm, appkit::rect(0.0, 150.0, 380.0, 205.0));
-    let field_row = |label_text: &str, rel_y: f64| -> Retained<NSTextField> {
+    let field_row = |label_text: &str, rel_y: f64, initial: &str| -> Retained<NSTextField> {
         appkit::add_subview(
             &s3_box,
             &appkit::label(
@@ -206,26 +336,28 @@ pub fn open(mtm: MainThreadMarker) {
                 label_text,
             ),
         );
-        let f = appkit::text_field(mtm, appkit::rect(150.0, rel_y, 210.0, 22.0), "");
+        let f = appkit::text_field(mtm, appkit::rect(150.0, rel_y, 210.0, 22.0), initial);
         appkit::add_subview(&s3_box, &f);
         f
     };
-    let endpoint = field_row("Endpoint", 178.0);
-    let bucket = field_row("Bucket", 150.0);
-    let region = field_row("Region", 122.0);
-    let akid = field_row("Access Key ID", 94.0);
+    let endpoint = field_row("Endpoint", 178.0, &init_endpoint);
+    let bucket = field_row("Bucket", 150.0, &init_bucket);
+    let region = field_row("Region", 122.0, &init_region);
+    let akid = field_row("Access Key ID", 94.0, &init_akid);
     appkit::add_subview(
         &s3_box,
         &appkit::label(mtm, appkit::rect(20.0, 68.0, 120.0, 20.0), "Secret"),
     );
     let secret = appkit::secure_field(mtm, appkit::rect(150.0, 66.0, 210.0, 22.0));
+    appkit::set_string(&secret, &init_secret);
     appkit::add_subview(&s3_box, &secret);
-    let token = field_row("Session token", 38.0);
+    let token = field_row("Session token", 38.0, &init_token);
     let save_keychain = appkit::checkbox(
         mtm,
         appkit::rect(150.0, 8.0, 210.0, 20.0),
         "Save secret to Keychain",
     );
+    appkit::set_checkbox_on(&save_keychain, init_save_keychain);
     appkit::add_subview(&s3_box, &save_keychain);
     add_top(&s3_box);
 
@@ -235,6 +367,7 @@ pub fn open(mtm: MainThreadMarker) {
         appkit::rect(150.0, 100.0, 210.0, 20.0),
         "Mount when launching",
     );
+    appkit::set_checkbox_on(&mount_launch, init_mount_launch);
     add_bottom(&mount_launch);
     let status = appkit::label(mtm, appkit::rect(20.0, 56.0, 340.0, 44.0), "");
     add_bottom(&status);
@@ -243,6 +376,13 @@ pub fn open(mtm: MainThreadMarker) {
     let save = appkit::push_button(mtm, appkit::rect(256.0, 14.0, 104.0, 32.0), "Test & Save");
     appkit::set_default_button(&save); // primary button (tinted, triggered by Return)
     add_bottom(&save);
+    // Destructive Delete, only when editing an existing connection (left corner).
+    let delete = original_name.is_some().then(|| {
+        let b = appkit::push_button(mtm, appkit::rect(20.0, 14.0, 100.0, 32.0), "Delete");
+        appkit::set_button_destructive(&b);
+        add_bottom(&b);
+        b
+    });
 
     let controller = AddWindowController::new(
         mtm,
@@ -260,6 +400,7 @@ pub fn open(mtm: MainThreadMarker) {
             save_keychain: save_keychain.clone(),
             mount_launch: mount_launch.clone(),
             status: status.clone(),
+            original_name,
         },
     );
 
@@ -268,6 +409,9 @@ pub fn open(mtm: MainThreadMarker) {
     appkit::set_target_action(&type_popup, sel!(typeChanged:), target);
     appkit::set_target_action(&save, sel!(testAndSave:), target);
     appkit::set_target_action(&cancel, sel!(cancel:), target);
+    if let Some(delete) = &delete {
+        appkit::set_target_action(delete, sel!(delete:), target);
+    }
 
     controller.update_visibility();
 

@@ -10,7 +10,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSControl,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSAutoresizingMaskOptions,
+    NSBackingStoreType, NSButton, NSColor, NSControl, NSControlStateValueOff,
     NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton, NSSecureTextField,
     NSStatusItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
@@ -33,11 +34,6 @@ pub fn set_menu_delegate(menu: &NSMenu, delegate: &ProtocolObject<dyn NSMenuDele
 /// Remove every item from a menu (called before repopulating it).
 pub fn clear_menu(menu: &NSMenu) {
     menu.removeAllItems();
-}
-
-/// Attach a submenu to a menu item (the item then opens it instead of firing).
-pub fn set_submenu(item: &NSMenuItem, submenu: &NSMenu) {
-    item.setSubmenu(Some(submenu));
 }
 
 /// A separator menu item.
@@ -85,6 +81,12 @@ pub fn represented_string(item: &NSMenuItem) -> Option<String> {
 /// Attach a menu to a status item.
 pub fn set_menu(item: &NSStatusItem, menu: &NSMenu) {
     item.setMenu(Some(menu));
+}
+
+/// Attach a submenu to a menu item, turning that row into an expandable dropdown.
+/// The item's own action (if any) is ignored once it has a submenu.
+pub fn set_submenu(item: &NSMenuItem, submenu: &NSMenu) {
+    item.setSubmenu(Some(submenu));
 }
 
 /// Set the glyph shown in the menu bar for a status item.
@@ -240,6 +242,17 @@ pub fn popup_index(popup: &NSPopUpButton) -> isize {
     popup.indexOfSelectedItem()
 }
 
+/// Select the pop-up's item at `index` (out-of-range indices are ignored by AppKit).
+pub fn select_popup_index(popup: &NSPopUpButton, index: isize) {
+    popup.selectItemAtIndex(index);
+}
+
+/// Make a text field editable or not (used to lock the name when editing an
+/// existing connection — its name is the stable key the UI addresses).
+pub fn set_editable(field: &NSTextField, editable: bool) {
+    field.setEditable(editable);
+}
+
 /// A checkbox (no action — its state is read on save).
 pub fn checkbox(mtm: MainThreadMarker, frame: NSRect, title: &str) -> Retained<NSButton> {
     // SAFETY: no target/action is wired (target=None, action=None), so there are
@@ -256,6 +269,16 @@ pub fn checkbox_on(button: &NSButton) -> bool {
     button.state() == NSControlStateValueOn
 }
 
+/// Set a checkbox's checked state (used to pre-fill the form when editing).
+pub fn set_checkbox_on(button: &NSButton, on: bool) {
+    let state = if on {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    };
+    button.setState(state);
+}
+
 /// A push button. Wire its action later with [`set_target_action`].
 pub fn push_button(mtm: MainThreadMarker, frame: NSRect, title: &str) -> Retained<NSButton> {
     // SAFETY: no target/action wired here (both None), so nothing to uphold.
@@ -269,6 +292,23 @@ pub fn push_button(mtm: MainThreadMarker, frame: NSRect, title: &str) -> Retaine
 /// Make a button the window's default (primary): tinted, and triggered by Return.
 pub fn set_default_button(button: &NSButton) {
     button.setKeyEquivalent(&NSString::from_str("\r"));
+}
+
+/// Give a button a red bezel to mark it as destructive (the Delete action).
+pub fn set_button_destructive(button: &NSButton) {
+    button.setBezelColor(Some(&NSColor::systemRedColor()));
+}
+
+/// Show a modal "are you sure?" alert with a destructive default button. Returns
+/// `true` only if the user confirms (clicks `confirm_title`).
+pub fn confirm(mtm: MainThreadMarker, message: &str, info: &str, confirm_title: &str) -> bool {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(message));
+    alert.setInformativeText(&NSString::from_str(info));
+    // First button is the default; add the destructive action first, then Cancel.
+    alert.addButtonWithTitle(&NSString::from_str(confirm_title));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    alert.runModal() == NSAlertFirstButtonReturn
 }
 
 /// Read a text field's current string.
