@@ -37,8 +37,12 @@
         <false/>
         <key>FSActivateOptionSyntax</key>
         <dict>
+            <!-- Accept the standard `-o key=value,…` mount options (getopt: `o` takes
+                 an argument), like Apple's msdos module (`u:g:m:o:`). Without this,
+                 FSKit rejects any `-o` with "Argument count N not equal to expected
+                 count 2". The extension reads them from FSTaskOptions.taskOptions. -->
             <key>shortOptions</key>
-            <string></string>
+            <string>o:</string>
         </dict>
         <key>FSCheckOptionSyntax</key>
         <dict>

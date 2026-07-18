@@ -224,6 +224,12 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   pointer dangles and crashes the extension.
 - **`enumerate`**: pack `FSItemAttributes` inline in `packEntry`, or entries
   don't show up in `ls`.
+- **`-o` options need an option syntax**: to accept `mount -o key=value,…`, the
+  Info.plist's `FSActivateOptionSyntax` must declare a getopt string with `o:`
+  (Apple's msdos uses `u:g:m:o:`). Empty ⇒ `mount` fails with "Argument count N not
+  equal to expected count 2". The extension then reads them from
+  `FSTaskOptions.taskOptions`. Connection names must be shell-safe (no spaces/
+  slashes) since they ride the `-o` string.
 - Nuclear reset for accumulated daemon state: `sudo killall fskitd`.
 
 Next: verify the S3 path end-to-end on a signed build (framework linking + reading

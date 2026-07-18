@@ -207,9 +207,13 @@ fn parse_options(options: &FSTaskOptions) -> HashMap<String, String> {
     let tokens = options.taskOptions();
     let mut map = HashMap::new();
     for i in 0..tokens.count() {
+        // A token may be a single `key=value`, or the whole comma-joined `-o`
+        // string — split on commas first so both shapes work.
         let token = tokens.objectAtIndex(i).to_string();
-        if let Some((key, value)) = token.split_once('=') {
-            map.insert(key.to_string(), value.to_string());
+        for part in token.split(',') {
+            if let Some((key, value)) = part.split_once('=') {
+                map.insert(key.trim().to_string(), value.to_string());
+            }
         }
     }
     map

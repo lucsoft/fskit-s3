@@ -127,13 +127,17 @@ impl Connection {
         if name.is_empty() {
             return Err("Name is required.".to_string());
         }
-        // `name` is a path component (mount point), a Keychain account, and an
-        // `-o` value, so it can't contain a slash or the `-o` comma delimiter.
-        if name.contains('/') {
-            return Err("Name can't contain a slash.".to_string());
-        }
-        if name.contains(',') {
-            return Err("Name can't contain a comma.".to_string());
+        // `name` is a path component (mount point), a Keychain account, and an `-o`
+        // value, so restrict it to a safe identifier — a space or slash would break
+        // the `mount -o` parsing (that's the "Argument count N ≠ 2" error).
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        {
+            return Err(
+                "Name can only contain letters, numbers, and . - _ (no spaces or slashes)."
+                    .to_string(),
+            );
         }
 
         if !input.is_s3 {
@@ -386,16 +390,22 @@ mod tests {
 
     #[test]
     fn from_form_rejects_bad_names() {
-        let err = |name: &str| {
+        let rejected = |name: &str| {
             Connection::from_form(FormInput {
                 name: name.to_string(),
                 ..s3_form()
             })
-            .unwrap_err()
+            .is_err()
         };
-        assert!(err("").contains("required"));
-        assert!(err("a/b").contains("slash"));
-        assert!(err("a,b").contains("comma"));
+        assert!(rejected(""), "empty");
+        for bad in ["a/b", "a,b", "a b", "a=b"] {
+            assert!(rejected(bad), "{bad:?} should be rejected");
+        }
+        assert!(Connection::from_form(FormInput {
+            name: "local-rustfs".to_string(),
+            ..s3_form()
+        })
+        .is_ok());
     }
 
     #[test]
