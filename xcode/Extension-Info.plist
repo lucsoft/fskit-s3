@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Info.plist for the ExtensionKit FSKit extension target.
-     The FSKit module attributes (short name, supported resource kinds) live
-     INSIDE EXAppExtensionAttributes — that's where FSKit/mount read them (verified
-     against Apple's msdos and fuse-t modules). We're a device-less filesystem, so
-     we accept a PathURL resource (FSSupportsPathURLs), not a block device. -->
+<!-- Info.plist for the ExtensionKit FSKit extension.
+     The EXAppExtensionAttributes block mirrors Apple's FSKitSample and fuse-t: a
+     complete FS module declares its option syntaxes, (empty) media types and
+     personalities, and its supported resource kinds — not just the short name.
+     We're device-less, so we accept PathURL resources, not a block device. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -31,6 +31,29 @@
         <true/>
         <key>FSSupportsServerURLs</key>
         <false/>
+        <key>FSSupportsGenericURLResources</key>
+        <false/>
+        <key>FSRequiresSecurityScopedPathURLResources</key>
+        <false/>
+        <key>FSActivateOptionSyntax</key>
+        <dict>
+            <key>shortOptions</key>
+            <string></string>
+        </dict>
+        <key>FSCheckOptionSyntax</key>
+        <dict>
+            <key>shortOptions</key>
+            <string></string>
+        </dict>
+        <key>FSFormatOptionSyntax</key>
+        <dict>
+            <key>shortOptions</key>
+            <string></string>
+        </dict>
+        <key>FSMediaTypes</key>
+        <dict/>
+        <key>FSPersonalities</key>
+        <dict/>
     </dict>
 </dict>
 </plist>
