@@ -6,7 +6,7 @@
 //! runtime and fires the reply block with the result (or a POSIX error).
 
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use block2::DynBlock;
 use objc2::rc::Retained;
@@ -21,8 +21,13 @@ use crate::item::{item_id_for, S3Item};
 use crate::sys::*;
 
 /// Volume state carried on the ObjC instance.
+///
+/// The backend is chosen from the mount's `-o` options, which FSKit delivers to
+/// `activateWithOptions:` (not `loadResource:`) — so it's filled in at activate
+/// time, once, via a `OnceLock`. Every operation runs after activate, so the
+/// backend is set by the time it's read; a still-empty lock is treated as EIO.
 pub struct VolumeIvars {
-    backend: Arc<dyn StorageBackend>,
+    backend: OnceLock<Arc<dyn StorageBackend>>,
     rt: Runtime,
 }
 
@@ -92,9 +97,26 @@ define_class!(
         #[unsafe(method(activateWithOptions:replyHandler:))]
         fn activate(
             &self,
-            _options: &FSTaskOptions,
+            options: &FSTaskOptions,
             reply: &DynBlock<dyn Fn(*mut FSItem, *mut NSError)>,
         ) {
+            // The mount's `-o` config arrives HERE (not at loadResource), so this
+            // is where the backend is chosen. A misconfigured connection fails the
+            // activation (EINVAL) rather than mounting an unusable volume.
+            match crate::backend_for(options) {
+                Ok(backend) => {
+                    // Set once; activate runs a single time per mount.
+                    let _ = self.ivars().backend.set(backend);
+                }
+                Err(msg) => {
+                    crate::log_line(&format!("activate failed: {msg}"));
+                    reply.call((
+                        ptr::null_mut(),
+                        Retained::as_ptr(&err(libc::EINVAL)) as *mut NSError,
+                    ));
+                    return;
+                }
+            }
             // FSKit holds the root item for the mount's lifetime (until
             // reclaimItem), so transfer ownership (+1) rather than lend it.
             let root = S3Item::new("/".to_string(), true, 0);
@@ -149,8 +171,16 @@ define_class!(
                 ));
                 return;
             };
+            let Some(backend) = self.backend() else {
+                reply.call((
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    Retained::as_ptr(&err(libc::EIO)) as *mut NSError,
+                ));
+                return;
+            };
             let child = join(dir.path(), &name_str);
-            match self.ivars().rt.block_on(self.ivars().backend.stat(&child)) {
+            match self.ivars().rt.block_on(backend.stat(&child)) {
                 Ok(entry) => {
                     // FSKit keeps the item (until reclaimItem) → transfer ownership.
                     // The name is copied synchronously, so lending it is fine.
@@ -190,11 +220,11 @@ define_class!(
                 reply.call((verifier, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
                 return;
             };
-            let entries = match self
-                .ivars()
-                .rt
-                .block_on(self.ivars().backend.list(dir.path()))
-            {
+            let Some(backend) = self.backend() else {
+                reply.call((verifier, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
+                return;
+            };
+            let entries = match self.ivars().rt.block_on(backend.list(dir.path())) {
                 Ok(entries) => entries,
                 Err(e) => {
                     reply.call((verifier, Retained::as_ptr(&err(errno(&e))) as *mut NSError));
@@ -347,18 +377,23 @@ define_class!(
                 reply.call((0, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
                 return;
             };
-            let cap = length.min(buffer.length());
-            let data = match self.ivars().rt.block_on(self.ivars().backend.read(
-                item.path(),
-                offset.max(0) as u64,
-                cap,
-            )) {
-                Ok(data) => data,
-                Err(e) => {
-                    reply.call((0, Retained::as_ptr(&err(errno(&e))) as *mut NSError));
-                    return;
-                }
+            let Some(backend) = self.backend() else {
+                reply.call((0, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
+                return;
             };
+            let cap = length.min(buffer.length());
+            let data =
+                match self
+                    .ivars()
+                    .rt
+                    .block_on(backend.read(item.path(), offset.max(0) as u64, cap))
+                {
+                    Ok(data) => data,
+                    Err(e) => {
+                        reply.call((0, Retained::as_ptr(&err(errno(&e))) as *mut NSError));
+                        return;
+                    }
+                };
             let n = data.len().min(cap);
             let dst = buffer.mutableBytes() as *mut u8;
             if !dst.is_null() && n > 0 {
@@ -383,15 +418,20 @@ define_class!(
 );
 
 impl S3Volume {
-    /// Build a volume over `backend`, running its futures on `rt`.
-    pub fn new(
-        volume_id: &FSVolumeIdentifier,
-        name: &FSFileName,
-        backend: Arc<dyn StorageBackend>,
-        rt: Runtime,
-    ) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(VolumeIvars { backend, rt });
+    /// Build a volume whose futures run on `rt`. The backend is not known yet —
+    /// it's chosen from the `-o` options at `activate` time and stored then.
+    pub fn new(volume_id: &FSVolumeIdentifier, name: &FSFileName, rt: Runtime) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(VolumeIvars {
+            backend: OnceLock::new(),
+            rt,
+        });
         unsafe { msg_send![super(this), initWithVolumeID: volume_id, volumeName: name] }
+    }
+
+    /// The backend selected at activate, or `None` if activate hasn't set it
+    /// (or failed to build one). Callers map `None` to EIO.
+    fn backend(&self) -> Option<&Arc<dyn StorageBackend>> {
+        self.ivars().backend.get()
     }
 }
 

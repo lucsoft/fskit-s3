@@ -98,13 +98,16 @@ prefix).
   hand-written `objc2` bindings for FSKit classes + the three volume protocols.
   `item.rs`: `FSKitS3Item` (`FSItem` subclass carrying the path). `volume.rs`:
   `FSKitS3Volume` — the read path (activate/lookup/getAttributes/enumerate/read)
-  against a `StorageBackend` on a tokio runtime; mutating ops reply `EROFS`.
-  `lib.rs`: `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
-  `fskit_s3_make_filesystem` entry point. `loadResource` picks the backend from
-  the mount's `-o` options (`backend_for`), dispatching on an explicit `type`:
-  `type=s3` (secret from the shared Keychain group, else an `-o secret`) or
-  `type=memory` (the demo). A missing `type` **fails the mount** — it never
-  silently serves the demo.
+  against a `StorageBackend` on a tokio runtime; mutating ops reply `EROFS`. It
+  also **picks the backend** in `activateWithOptions:` (`backend_for`), because
+  that's where FSKit delivers the mount's `-o` options — see the gotcha below —
+  dispatching on an explicit `type`: `type=s3` (secret from the shared Keychain
+  group, else an `-o secret`) or `type=memory` (the demo). A missing/unknown
+  `type` **fails the activation** — it never silently serves the demo. `lib.rs`:
+  `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
+  `fskit_s3_make_filesystem` entry point. `loadResource` builds the volume (with
+  its tokio runtime) but leaves the backend unset, since the `-o` options aren't
+  available yet at load time.
 - **`app/src/`** — `fskit-s3-app`, the macOS app (a status-bar app):
   - `connection.rs` — the `Connection`/`ConnectionKind` (`Memory` | `S3(S3Meta)`)
     model + the persisted `Registry` (`~/Library/Application Support/fskit-s3/
@@ -240,6 +243,15 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   equal to expected count 2". The extension then reads them from
   `FSTaskOptions.taskOptions`. Connection names must be shell-safe (no spaces/
   slashes) since they ride the `-o` string.
+- **`-o` options arrive at the VOLUME's `activateWithOptions:`, NOT at
+  `loadResource:options:`** (they're parsed per `FSActivateOptionSyntax`, an
+  *activate*-phase syntax). `loadResource`'s `FSTaskOptions.taskOptions` is empty;
+  the volume's `mountWithOptions:` is empty too — only `activate` gets the tokens,
+  as an argv-style `["-o","type=s3","-o","name=…", …]` array. So the backend must
+  be chosen in `activate`, not `load`. Reading options at load ⇒ every mount fails
+  the loadResource step with **`Invalid argument` / EINVAL (POSIX 22)** ("mount:
+  Loading resource: … Invalid argument"). This masqueraded as a Keychain/config
+  problem for a while; it isn't. (Confirmed by dumping `taskOptions` per phase.)
 - Nuclear reset for accumulated daemon state: `sudo killall fskitd`.
 
 Next: verify the S3 path end-to-end on a signed build (framework linking + reading

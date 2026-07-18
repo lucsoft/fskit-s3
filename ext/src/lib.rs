@@ -73,12 +73,17 @@ define_class!(
         fn load(
             &self,
             _resource: &FSResource,
-            options: &FSTaskOptions,
+            _options: &FSTaskOptions,
             reply: &DynBlock<dyn Fn(*mut FSVolume, *mut NSError)>,
         ) {
             // Transition the container from `notReady` to `ready`; without this
             // FSKit rejects the load with "unexpected container state" (POSIX 35).
             self.set_container_state(ContainerState::Ready);
+            // NB: `loadResource` does NOT receive the mount's `-o` options — FSKit
+            // delivers those to the volume's `activateWithOptions:` (they are parsed
+            // per `FSActivateOptionSyntax`). So the backend can't be chosen here; we
+            // build the volume now (with its tokio runtime) and defer backend
+            // selection to `activate`, which is where the config actually arrives.
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -90,23 +95,11 @@ define_class!(
                     return;
                 }
             };
-            // Pick the backend from the `-o` options: an S3 bucket for a named
-            // connection, else the in-memory demo. A misconfigured S3 connection
-            // fails the mount rather than silently serving the demo.
-            let backend = match backend_for(options) {
-                Ok(backend) => backend,
-                Err(msg) => {
-                    log_line(&format!("loadResource failed: {msg}"));
-                    let err = posix_error(libc::EINVAL);
-                    reply.call((ptr::null_mut(), Retained::as_ptr(&err) as *mut NSError));
-                    return;
-                }
-            };
             let volume = {
                 let uuid = NSUUID::new();
                 let vid = FSVolumeIdentifier::initWithUUID(FSVolumeIdentifier::alloc(), &uuid);
                 let name = FSFileName::nameWithString(&NSString::from_str("fskit-s3"));
-                S3Volume::new(&vid, &name, backend, rt)
+                S3Volume::new(&vid, &name, rt)
             };
             // Transfer ownership (+1) to FSKit: it holds the volume for the whole
             // mount, well past this call, so a borrowed pointer would dangle.
