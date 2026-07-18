@@ -1,9 +1,10 @@
 //! `FSVolume` subclass: maps FSKit's volume operations onto a `StorageBackend`.
 //!
-//! Read-only. The read path (activate/lookup/getAttributes/enumerate/read) is
-//! implemented against the backend; every mutating operation replies `EROFS`.
-//! Each FSKit call runs the backend future to completion on the volume's tokio
-//! runtime and fires the reply block with the result (or a POSIX error).
+//! Read-write. The read path (activate/lookup/getAttributes/enumerate/read) and
+//! the write path (create/write/setAttributes/remove/rename) are both mapped onto
+//! the backend; only symlink/hardlink ops (which object stores can't model) reply
+//! an error. Each FSKit call runs the backend future to completion on the volume's
+//! tokio runtime and fires the reply block with the result (or a POSIX error).
 
 use std::ptr;
 use std::sync::{Arc, OnceLock};
@@ -15,7 +16,7 @@ use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass};
 use objc2_foundation::{NSData, NSError, NSString};
 use tokio::runtime::Runtime;
 
-use fskit_s3_core::{path as corepath, StorageBackend, StorageError};
+use fskit_s3_core::{path as corepath, EntryKind, StorageBackend, StorageError};
 
 use crate::item::{item_id_for, S3Item};
 use crate::sys::*;
@@ -158,7 +159,7 @@ define_class!(
                 ));
                 return;
             };
-            let attrs = attributes_for(item);
+            let attrs = self.fresh_attributes(item);
             reply.call((
                 Retained::as_ptr(&attrs) as *mut FSItemAttributes,
                 ptr::null_mut(),
@@ -265,17 +266,42 @@ define_class!(
             reply.call((verifier, ptr::null_mut()));
         }
 
-        // ---- mutating operations: read-only volume ----
+        // ---- mutating operations ----
         #[unsafe(method(setAttributes:onItem:replyHandler:))]
         fn setAttributes(
             &self,
-            _attrs: &FSItemSetAttributesRequest,
-            _item: &FSItem,
+            attrs: &FSItemSetAttributesRequest,
+            item: &FSItem,
             reply: &DynBlock<dyn Fn(*mut FSItemAttributes, *mut NSError)>,
         ) {
+            let (Some(item), Some(backend)) = (item.downcast_ref::<S3Item>(), self.backend())
+            else {
+                reply.call((
+                    ptr::null_mut(),
+                    Retained::as_ptr(&err(libc::EIO)) as *mut NSError,
+                ));
+                return;
+            };
+            // Apply a size change (truncate/extend) when requested. Object stores
+            // have nowhere to keep mode/owner/timestamps, so those are accepted as
+            // no-ops (replying success) rather than failing `cp -p`, editors, etc.
+            if attrs.isValid(FS_ITEM_ATTRIBUTE_SIZE) && !item.is_dir() {
+                if let Err(e) = self
+                    .ivars()
+                    .rt
+                    .block_on(backend.truncate(item.path(), attrs.size()))
+                {
+                    reply.call((
+                        ptr::null_mut(),
+                        Retained::as_ptr(&err(errno(&e))) as *mut NSError,
+                    ));
+                    return;
+                }
+            }
+            let fresh = self.fresh_attributes(item);
             reply.call((
+                Retained::as_ptr(&fresh) as *mut FSItemAttributes,
                 ptr::null_mut(),
-                Retained::as_ptr(&err(libc::EROFS)) as *mut NSError,
             ));
         }
 
@@ -294,17 +320,56 @@ define_class!(
         #[unsafe(method(createItemNamed:type:inDirectory:attributes:replyHandler:))]
         fn createItem(
             &self,
-            _name: &FSFileName,
-            _item_type: FSItemType,
-            _directory: &FSItem,
+            name: &FSFileName,
+            item_type: FSItemType,
+            directory: &FSItem,
             _attributes: &FSItemSetAttributesRequest,
             reply: &DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
         ) {
-            reply.call((
-                ptr::null_mut(),
-                ptr::null_mut(),
-                Retained::as_ptr(&err(libc::EROFS)) as *mut NSError,
-            ));
+            let (Some(dir), Some(name_str), Some(backend)) = (
+                directory.downcast_ref::<S3Item>(),
+                file_name_string(name),
+                self.backend(),
+            ) else {
+                reply.call((
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    Retained::as_ptr(&err(libc::EIO)) as *mut NSError,
+                ));
+                return;
+            };
+            // We can model files and directories; symlinks/fifos/etc. can't live
+            // in an object store, so decline them (ENOTSUP) rather than fake them.
+            let kind = match item_type {
+                FS_ITEM_TYPE_FILE => EntryKind::File,
+                FS_ITEM_TYPE_DIRECTORY => EntryKind::Dir,
+                _ => {
+                    reply.call((
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        Retained::as_ptr(&err(libc::ENOTSUP)) as *mut NSError,
+                    ));
+                    return;
+                }
+            };
+            let child = join(dir.path(), &name_str);
+            match self.ivars().rt.block_on(backend.create(&child, kind)) {
+                Ok(()) => {
+                    // FSKit keeps the item (until reclaimItem) → transfer ownership.
+                    let item = S3Item::new(child, kind == EntryKind::Dir, 0);
+                    let fname = FSFileName::nameWithString(&NSString::from_str(&name_str));
+                    reply.call((
+                        Retained::into_raw(item) as *mut FSItem,
+                        Retained::as_ptr(&fname) as *mut FSFileName,
+                        ptr::null_mut(),
+                    ));
+                }
+                Err(e) => reply.call((
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    Retained::as_ptr(&err(errno(&e))) as *mut NSError,
+                )),
+            }
         }
 
         #[unsafe(method(createSymbolicLinkNamed:inDirectory:attributes:linkContents:replyHandler:))]
@@ -316,10 +381,11 @@ define_class!(
             _contents: &FSFileName,
             reply: &DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
         ) {
+            // Object stores have no symlink concept.
             reply.call((
                 ptr::null_mut(),
                 ptr::null_mut(),
-                Retained::as_ptr(&err(libc::EROFS)) as *mut NSError,
+                Retained::as_ptr(&err(libc::ENOTSUP)) as *mut NSError,
             ));
         }
 
@@ -331,39 +397,72 @@ define_class!(
             _directory: &FSItem,
             reply: &DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
         ) {
+            // No hard links in an object store.
             reply.call((
                 ptr::null_mut(),
-                Retained::as_ptr(&err(libc::EROFS)) as *mut NSError,
+                Retained::as_ptr(&err(libc::ENOTSUP)) as *mut NSError,
             ));
         }
 
         #[unsafe(method(removeItem:named:fromDirectory:replyHandler:))]
         fn removeItem(
             &self,
-            _item: &FSItem,
+            item: &FSItem,
             _name: &FSFileName,
             _directory: &FSItem,
             reply: &DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            reply.call((Retained::as_ptr(&err(libc::EROFS)) as *mut NSError,));
+            let (Some(item), Some(backend)) = (item.downcast_ref::<S3Item>(), self.backend())
+            else {
+                reply.call((Retained::as_ptr(&err(libc::EIO)) as *mut NSError,));
+                return;
+            };
+            let kind = if item.is_dir() {
+                EntryKind::Dir
+            } else {
+                EntryKind::File
+            };
+            match self.ivars().rt.block_on(backend.remove(item.path(), kind)) {
+                Ok(()) => reply.call((ptr::null_mut(),)),
+                Err(e) => reply.call((Retained::as_ptr(&err(errno(&e))) as *mut NSError,)),
+            }
         }
 
         #[unsafe(method(renameItem:inDirectory:named:toNewName:inDirectory:overItem:replyHandler:))]
         #[allow(clippy::too_many_arguments)]
         fn renameItem(
             &self,
-            _item: &FSItem,
+            item: &FSItem,
             _source_directory: &FSItem,
             _source_name: &FSFileName,
-            _destination_name: &FSFileName,
-            _destination_directory: &FSItem,
+            destination_name: &FSFileName,
+            destination_directory: &FSItem,
             _over_item: *mut FSItem,
             reply: &DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
         ) {
-            reply.call((
-                ptr::null_mut(),
-                Retained::as_ptr(&err(libc::EROFS)) as *mut NSError,
-            ));
+            let (Some(item), Some(dest_dir), Some(dest_name), Some(backend)) = (
+                item.downcast_ref::<S3Item>(),
+                destination_directory.downcast_ref::<S3Item>(),
+                file_name_string(destination_name),
+                self.backend(),
+            ) else {
+                reply.call((
+                    ptr::null_mut(),
+                    Retained::as_ptr(&err(libc::EIO)) as *mut NSError,
+                ));
+                return;
+            };
+            let dst = join(dest_dir.path(), &dest_name);
+            match self.ivars().rt.block_on(backend.rename(item.path(), &dst)) {
+                Ok(()) => {
+                    let fname = FSFileName::nameWithString(&NSString::from_str(&dest_name));
+                    reply.call((Retained::as_ptr(&fname) as *mut FSFileName, ptr::null_mut()));
+                }
+                Err(e) => reply.call((
+                    ptr::null_mut(),
+                    Retained::as_ptr(&err(errno(&e))) as *mut NSError,
+                )),
+            }
         }
     }
 
@@ -411,12 +510,29 @@ define_class!(
         #[unsafe(method(writeContents:toFile:atOffset:replyHandler:))]
         fn write(
             &self,
-            _contents: &NSData,
-            _item: &FSItem,
-            _offset: i64,
+            contents: &NSData,
+            item: &FSItem,
+            offset: i64,
             reply: &DynBlock<dyn Fn(usize, *mut NSError)>,
         ) {
-            reply.call((0, Retained::as_ptr(&err(libc::EROFS)) as *mut NSError));
+            let (Some(item), Some(backend)) = (item.downcast_ref::<S3Item>(), self.backend())
+            else {
+                reply.call((0, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
+                return;
+            };
+            // Copy the bytes out of the NSData before handing them to the async
+            // backend (the buffer is only valid for this call).
+            let data = contents.to_vec();
+            let len = data.len();
+            match self
+                .ivars()
+                .rt
+                .block_on(backend.write(item.path(), offset.max(0) as u64, &data))
+            {
+                // The backend writes the whole slice or errors; report all `len`.
+                Ok(()) => reply.call((len, ptr::null_mut())),
+                Err(e) => reply.call((0, Retained::as_ptr(&err(errno(&e))) as *mut NSError)),
+            }
         }
     }
 );
@@ -437,19 +553,31 @@ impl S3Volume {
     fn backend(&self) -> Option<&Arc<dyn StorageBackend>> {
         self.ivars().backend.get()
     }
-}
 
-/// Build an `FSItemAttributes` snapshot for an item.
-fn attributes_for(item: &S3Item) -> Retained<FSItemAttributes> {
-    let attrs = FSItemAttributes::new();
-    fill_attributes(
-        &attrs,
-        item.is_dir(),
-        item.size(),
-        item.item_id(),
-        item_id_for(corepath::parent(item.path())),
-    );
-    attrs
+    /// Build an `FSItemAttributes` snapshot for an item, reporting the file's
+    /// *current* size — the authoritative source is `stat` (per the object-store
+    /// model), so a file just written or truncated shows its real size instead of
+    /// the stale size cached on the `FSItem` at lookup time. Directories are size
+    /// 0; if the stat fails, fall back to the cached size.
+    fn fresh_attributes(&self, item: &S3Item) -> Retained<FSItemAttributes> {
+        let size = if item.is_dir() {
+            0
+        } else {
+            self.backend()
+                .and_then(|b| self.ivars().rt.block_on(b.stat(item.path())).ok())
+                .map(|e| e.size)
+                .unwrap_or_else(|| item.size())
+        };
+        let attrs = FSItemAttributes::new();
+        fill_attributes(
+            &attrs,
+            item.is_dir(),
+            size,
+            item.item_id(),
+            item_id_for(corepath::parent(item.path())),
+        );
+        attrs
+    }
 }
 
 /// Populate the full set of attributes FSKit's standard-attributes path requires.
@@ -520,6 +648,8 @@ fn errno(e: &StorageError) -> i32 {
         StorageError::NotFound => libc::ENOENT,
         StorageError::NotADirectory => libc::ENOTDIR,
         StorageError::NotAFile => libc::EISDIR,
+        StorageError::AlreadyExists => libc::EEXIST,
+        StorageError::NotEmpty => libc::ENOTEMPTY,
         StorageError::InvalidPath(_) => libc::EINVAL,
         StorageError::Backend(_) => libc::EIO,
     }

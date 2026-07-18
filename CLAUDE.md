@@ -24,9 +24,16 @@ contract between "the Apple side" and "the storage side" is one trait:
 ```rust
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
+    // read path
     async fn list(&self, dir: &str)  -> Result<Vec<Entry>, StorageError>;
     async fn stat(&self, path: &str) -> Result<Entry,      StorageError>;
     async fn read(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, StorageError>;
+    // write path
+    async fn create(&self, path: &str, kind: EntryKind) -> Result<(), StorageError>;
+    async fn write(&self, path: &str, offset: u64, data: &[u8]) -> Result<(), StorageError>;
+    async fn truncate(&self, path: &str, len: u64) -> Result<(), StorageError>;
+    async fn remove(&self, path: &str, kind: EntryKind) -> Result<(), StorageError>;
+    async fn rename(&self, from: &str, to: &str) -> Result<(), StorageError>;
 }
 ```
 
@@ -40,6 +47,20 @@ FSKit's ops map 1:1 onto the trait:
 - `enumerateDirectory` → `list`
 - `lookupItemNamed` / `getAttributes` → `stat`
 - `readFromFile … offset length` → `read`
+- `createItemNamed:type:` → `create`
+- `writeContents … atOffset` → `write`; `setAttributes:` (size) → `truncate`
+- `removeItem` → `remove`; `renameItem` → `rename`
+
+**Write semantics.** Object stores have no partial-write, append, or atomic-
+rename primitive — a key is written or copied whole. So `write`/`truncate` are
+read-modify-write of the entire object and `rename` is copy-then-delete (server-
+side copy on S3, client-side read+write on services without it). That is
+O(object size) per call — correct and simple, the deliberate first cut; a future
+optimization can buffer a file's writes per open handle and flush once. Because
+sizes then change under us, the ext reports the **authoritative** size by
+`stat`-ing the backend in `getAttributes`/`setAttributes` rather than trusting
+the size cached on the `FSItem` at lookup. Symlinks/hard links can't live in an
+object store, so those ops reply `ENOTSUP`.
 
 ## Key decisions (and why)
 
@@ -62,7 +83,7 @@ FSKit's ops map 1:1 onto the trait:
   by the resource identity — no plaintext secrets on disk, fits the
   app-extension sandbox. (`VolumeState::demo` mounts a credential-free in-memory
   volume so FSKit plumbing can be brought up before this exists.)
-- **Target: a general-purpose bucket mount** (read-only first). *Not* Photos —
+- **Target: a general-purpose bucket mount** (now read-write). *Not* Photos —
   see the Photos note below.
 
 ## Object-store semantics
@@ -87,9 +108,9 @@ prefix).
   anywhere.
 - **`core/src/path.rs`** — absolute-path normalization + object-key helpers,
   unit-tested.
-- **`core/src/mem.rs`** — `InMemoryBackend`, a flat key→bytes map with
-  object-store semantics; test fixture + no-credential demo mount (feature
-  `mem`).
+- **`core/src/mem.rs`** — `InMemoryBackend`, a flat key→bytes map (behind an
+  `RwLock`, since the trait's mutating ops take `&self`) with object-store
+  semantics; read-write test fixture + no-credential demo mount (feature `mem`).
 - **`backend/src/lib.rs`** — `OpenDalBackend`: `StorageBackend` over any OpenDAL
   `Operator`; `S3Config` + `::s3()` constructor. Tested against OpenDAL's
   in-memory service; an ignored `live_s3_roundtrip` test runs against the
@@ -98,8 +119,9 @@ prefix).
   hand-written `objc2` bindings for FSKit classes + the three volume protocols.
   `item.rs`: `FSKitS3Item` (`FSItem` subclass carrying the path). `volume.rs`:
   `FSKitS3Volume` — the read path (activate/lookup/getAttributes/enumerate/read)
-  against a `StorageBackend` on a tokio runtime; mutating ops reply `EROFS`. It
-  also **picks the backend** in `activateWithOptions:` (`backend_for`), because
+  **and** the write path (create/write/setAttributes/remove/rename) against a
+  `StorageBackend` on a tokio runtime; only symlink/hard-link ops reply `ENOTSUP`.
+  It also **picks the backend** in `activateWithOptions:` (`backend_for`), because
   that's where FSKit delivers the mount's `-o` options — see the gotcha below —
   dispatching on an explicit `type`: `type=s3` (secret from the shared Keychain
   group, else an `-o secret`) or `type=memory` (the demo). A missing/unknown
@@ -219,9 +241,10 @@ build + the `keychain-access-groups` entitlement on both targets (see
 ## Building & running the extension
 
 The `ext` crate compiles to a Rust `staticlib` linked into an Xcode ExtensionKit
-target. **It mounts and serves files today** on macOS 26 — the in-memory demo for
-a `memory` connection, and a **real S3 bucket** for an S3 connection (config via
-`-o`, secret from the shared Keychain group):
+target. **It mounts and serves files today** on macOS 26 (now **read-write** — see
+the write-path note above) — the in-memory demo for a `memory` connection, and a
+**real S3 bucket** for an S3 connection (config via `-o`, secret from the shared
+Keychain group):
 
 ```sh
 xcodegen generate                 # -> fskit-s3.xcodeproj (from project.yml)
@@ -266,8 +289,10 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   the volume down (Finder's fuller attribute request hits this even when plain
   `ls`/`cat` didn't). The standard set FSKit demands is `type, mode, linkCount,
   uid, gid, flags, size, allocSize, fileID, parentID` **plus the access/modify/
-  change/birth `timespec` timestamps** — a read-only volume must still report them
-  all (see `fill_attributes`, used by both `getAttributes` and `enumerate`). The
+  change/birth `timespec` timestamps** — every op that reports attributes must
+  report them all (see `fill_attributes`, used by `getAttributes`, `setAttributes`,
+  and `enumerate`; the `size` bit is also read back off `setAttributes`' request
+  via `isValid:` to detect a truncate). The
   fault log prints `attributes mask is <got>, expected <want>`; XOR them against
   the `FSItemAttribute` bit values in `FSItem.h` to see which are missing. Passing
   a `timespec` by value needs an `Encode` impl matching `{timespec=qq}` (both
@@ -299,10 +324,17 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   problem for a while; it isn't. (Confirmed by dumping `taskOptions` per phase.)
 - Nuclear reset for accumulated daemon state: `sudo killall fskitd`.
 
-Next: verify the S3 path end-to-end on a signed build (framework linking + reading
-the shared Keychain group from the `fskitd` sandbox); move the app's "Test & Save"
-network check off the main thread. (Connection edit + delete are done — each
-connection's submenu has *Update…*, and the edit form has a red *Delete* button.)
+Next: verify the **write path** end-to-end on a signed build (create/write/mv/rm/
+truncate against a real bucket via Finder + shell — the trait and its two backends
+are unit-tested, but the FSKit write ops haven't been exercised on device); verify
+the S3 read path end-to-end too (framework linking + reading the shared Keychain
+group from the `fskitd` sandbox); move the app's "Test & Save" network check off
+the main thread. Possible write follow-ups: buffer a file's writes per open handle
+and flush once (today each `writeContents` is a whole-object read-modify-write, and
+each `getAttributes` on a file costs a `stat`), and serialize concurrent writes to
+one path (parallel `writeContents` calls could race the read-modify-write).
+(Connection edit + delete are done — each connection's submenu has *Update…*, and
+the edit form has a red *Delete* button.)
 
 ## The Photos question (deferred)
 

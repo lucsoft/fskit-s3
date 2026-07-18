@@ -23,7 +23,7 @@
     )
 )]
 
-use fskit_s3_core::{async_trait, path, Entry, StorageBackend, StorageError};
+use fskit_s3_core::{async_trait, path, Entry, EntryKind, StorageBackend, StorageError};
 use opendal::{EntryMode, ErrorKind, Operator};
 
 /// Connection details for an S3 (or S3-compatible) bucket.
@@ -78,7 +78,25 @@ fn map_err(e: opendal::Error) -> StorageError {
         ErrorKind::NotFound => StorageError::NotFound,
         ErrorKind::IsADirectory => StorageError::NotAFile,
         ErrorKind::NotADirectory => StorageError::NotADirectory,
+        ErrorKind::AlreadyExists => StorageError::AlreadyExists,
         _ => StorageError::Backend(e.to_string()),
+    }
+}
+
+impl OpenDalBackend {
+    /// Copy one object, server-side when the service supports it (S3 does),
+    /// falling back to a client-side read+write for services that don't (so
+    /// `rename` works everywhere the trait is used, e.g. the memory service).
+    async fn copy_object(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        match self.op.copy(from, to).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::Unsupported => {
+                let buf = self.op.read(from).await.map_err(map_err)?;
+                self.op.write(to, buf.to_vec()).await.map_err(map_err)?;
+                Ok(())
+            }
+            Err(e) => Err(map_err(e)),
+        }
     }
 }
 
@@ -93,9 +111,12 @@ impl StorageBackend for OpenDalBackend {
         let entries = self.op.list(&prefix).await.map_err(map_err)?;
 
         let mut out = Vec::with_capacity(entries.len());
+        let mut saw_self = false;
         for entry in entries {
-            // OpenDAL includes the listed directory itself; skip it.
+            // OpenDAL includes the listed directory itself; its presence proves
+            // the prefix exists even when it has no children (an empty dir marker).
             if entry.path() == prefix {
+                saw_self = true;
                 continue;
             }
             let name = entry.name().trim_end_matches('/').to_string();
@@ -109,8 +130,8 @@ impl StorageBackend for OpenDalBackend {
             });
         }
 
-        // A non-root prefix that lists nothing doesn't exist.
-        if !prefix.is_empty() && out.is_empty() {
+        // A non-root prefix with neither children nor a marker doesn't exist.
+        if !prefix.is_empty() && out.is_empty() && !saw_self {
             return Err(StorageError::NotFound);
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -169,6 +190,157 @@ impl StorageBackend for OpenDalBackend {
             .await
             .map_err(map_err)?;
         Ok(buf.to_vec())
+    }
+
+    async fn create(&self, p: &str, kind: EntryKind) -> Result<(), StorageError> {
+        let norm = path::normalize(p);
+        if norm == "/" {
+            return Err(StorageError::AlreadyExists);
+        }
+        // Refuse to clobber anything already at this path (as a file or a dir).
+        if self.stat(&norm).await.is_ok() {
+            return Err(StorageError::AlreadyExists);
+        }
+        match kind {
+            // An empty file is a zero-byte object; a directory is a prefix, which
+            // OpenDAL materializes via create_dir (a key ending in `/`).
+            EntryKind::File => {
+                self.op
+                    .write(&path::to_key(&norm, false), Vec::<u8>::new())
+                    .await
+                    .map_err(map_err)?;
+            }
+            EntryKind::Dir => {
+                self.op
+                    .create_dir(&path::to_key(&norm, true))
+                    .await
+                    .map_err(map_err)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn write(&self, p: &str, offset: u64, data: &[u8]) -> Result<(), StorageError> {
+        // Object stores have no partial write: read the whole object, splice the
+        // new bytes in (zero-filling any gap), and put it back. See the trait doc.
+        let norm = path::normalize(p);
+        let key = path::to_key(&norm, false);
+        let mut buf = match self.op.read(&key).await {
+            Ok(b) => b.to_vec(),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                // No object at the exact key: a directory prefix, or a brand-new
+                // file. Reject the former; treat the latter as an empty base.
+                if self.stat(&norm).await.map(|e| e.is_dir()).unwrap_or(false) {
+                    return Err(StorageError::NotAFile);
+                }
+                Vec::new()
+            }
+            Err(e) => return Err(map_err(e)), // IsADirectory -> NotAFile, etc.
+        };
+        let offset = offset as usize;
+        let end = offset.saturating_add(data.len());
+        if buf.len() < end {
+            buf.resize(end, 0);
+        }
+        if let Some(slot) = buf.get_mut(offset..end) {
+            slot.copy_from_slice(data);
+        }
+        self.op.write(&key, buf).await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn truncate(&self, p: &str, len: u64) -> Result<(), StorageError> {
+        let key = path::to_key(&path::normalize(p), false);
+        let mut buf = match self.op.read(&key).await {
+            Ok(b) => b.to_vec(),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Err(StorageError::NotFound),
+            Err(e) => return Err(map_err(e)),
+        };
+        buf.resize(len as usize, 0);
+        self.op.write(&key, buf).await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn remove(&self, p: &str, kind: EntryKind) -> Result<(), StorageError> {
+        let norm = path::normalize(p);
+        match kind {
+            EntryKind::File => {
+                let key = path::to_key(&norm, false);
+                match self.op.stat(&key).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == ErrorKind::NotFound => {
+                        return Err(StorageError::NotFound)
+                    }
+                    Err(e) => return Err(map_err(e)),
+                }
+                self.op.delete(&key).await.map_err(map_err)?;
+            }
+            EntryKind::Dir => {
+                // A non-empty directory can't be removed; `list` also surfaces
+                // NotFound for a directory that doesn't exist at all.
+                if !self.list(&norm).await?.is_empty() {
+                    return Err(StorageError::NotEmpty);
+                }
+                // Drop the prefix marker. delete is idempotent, so a purely
+                // implicit (marker-less) empty prefix is a harmless no-op.
+                self.op
+                    .delete(&path::to_key(&norm, true))
+                    .await
+                    .map_err(map_err)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> Result<(), StorageError> {
+        let from = path::normalize(from);
+        let to = path::normalize(to);
+        let from_file = path::to_key(&from, false);
+        let to_file = path::to_key(&to, false);
+
+        // File rename: copy the single object, then drop the original.
+        match self.op.stat(&from_file).await {
+            Ok(meta) if meta.mode() == EntryMode::FILE => {
+                self.copy_object(&from_file, &to_file).await?;
+                self.op.delete(&from_file).await.map_err(map_err)?;
+                return Ok(());
+            }
+            Ok(_) => {}                                     // a dir object; handle below
+            Err(e) if e.kind() == ErrorKind::NotFound => {} // maybe a prefix dir
+            Err(e) => return Err(map_err(e)),
+        }
+
+        // Directory rename: re-key every object under the prefix.
+        let from_dir = path::to_key(&from, true);
+        let to_dir = path::to_key(&to, true);
+        let entries = self
+            .op
+            .list_with(&from_dir)
+            .recursive(true)
+            .await
+            .map_err(map_err)?;
+        let mut moved = 0usize;
+        for entry in entries {
+            let src = entry.path();
+            let Some(suffix) = src.strip_prefix(&from_dir) else {
+                continue;
+            };
+            if suffix.is_empty() {
+                continue; // the prefix directory itself
+            }
+            let dst = format!("{to_dir}{suffix}");
+            if entry.metadata().mode() == EntryMode::DIR {
+                self.op.create_dir(&dst).await.map_err(map_err)?;
+            } else {
+                self.copy_object(src, &dst).await?;
+            }
+            self.op.delete(src).await.map_err(map_err)?;
+            moved += 1;
+        }
+        if moved == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
     }
 }
 
@@ -249,6 +421,102 @@ mod tests {
         ));
     }
 
+    fn empty() -> OpenDalBackend {
+        let op = Operator::new(opendal::services::Memory::default())
+            .unwrap()
+            .finish();
+        OpenDalBackend::new(op)
+    }
+
+    #[tokio::test]
+    async fn create_write_read_roundtrip() {
+        let b = empty();
+        b.create("/note.txt", EntryKind::File).await.unwrap();
+        assert_eq!(b.stat("/note.txt").await.unwrap().size, 0);
+        b.write("/note.txt", 0, b"hello").await.unwrap();
+        b.write("/note.txt", 5, b" world").await.unwrap();
+        assert_eq!(b.stat("/note.txt").await.unwrap().size, 11);
+        assert_eq!(b.read("/note.txt", 0, 100).await.unwrap(), b"hello world");
+    }
+
+    #[tokio::test]
+    async fn write_past_end_zero_fills_the_gap() {
+        let b = empty();
+        b.write("/sparse.bin", 3, b"XY").await.unwrap();
+        assert_eq!(b.read("/sparse.bin", 0, 100).await.unwrap(), b"\0\0\0XY");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_existing() {
+        let b = sample().await;
+        assert!(matches!(
+            b.create("/readme.txt", EntryKind::File).await,
+            Err(StorageError::AlreadyExists)
+        ));
+    }
+
+    #[tokio::test]
+    async fn truncate_shrinks_and_grows() {
+        let b = sample().await;
+        b.truncate("/readme.txt", 5).await.unwrap();
+        assert_eq!(b.read("/readme.txt", 0, 100).await.unwrap(), b"hello");
+        b.truncate("/readme.txt", 8).await.unwrap();
+        assert_eq!(b.stat("/readme.txt").await.unwrap().size, 8);
+        assert!(matches!(
+            b.truncate("/nope", 0).await,
+            Err(StorageError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn remove_file_and_dirs() {
+        let b = sample().await;
+        b.remove("/readme.txt", EntryKind::File).await.unwrap();
+        assert!(matches!(
+            b.stat("/readme.txt").await,
+            Err(StorageError::NotFound)
+        ));
+        assert!(matches!(
+            b.remove("/missing", EntryKind::File).await,
+            Err(StorageError::NotFound)
+        ));
+        // photos/ still has children.
+        assert!(matches!(
+            b.remove("/photos", EntryKind::Dir).await,
+            Err(StorageError::NotEmpty)
+        ));
+
+        let b = empty();
+        b.create("/d", EntryKind::Dir).await.unwrap();
+        assert!(b.stat("/d").await.unwrap().is_dir());
+        b.remove("/d", EntryKind::Dir).await.unwrap();
+        assert!(matches!(b.stat("/d").await, Err(StorageError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn rename_file_and_directory() {
+        let b = sample().await;
+        b.rename("/readme.txt", "/README").await.unwrap();
+        assert!(matches!(
+            b.stat("/readme.txt").await,
+            Err(StorageError::NotFound)
+        ));
+        assert_eq!(b.read("/README", 0, 100).await.unwrap(), b"hello world");
+
+        b.rename("/photos", "/pics").await.unwrap();
+        assert!(matches!(
+            b.stat("/photos").await,
+            Err(StorageError::NotFound)
+        ));
+        assert_eq!(b.stat("/pics/2026/a.jpg").await.unwrap().size, 10);
+        assert_eq!(b.stat("/pics/cover.png").await.unwrap().size, 5);
+
+        assert!(matches!(
+            b.rename("/missing", "/x").await,
+            Err(StorageError::NotFound)
+        ));
+    }
+
     /// End-to-end against a live S3 endpoint (the `compose.yaml` RustFS). Ignored
     /// by default so CI stays hermetic; run it with:
     ///
@@ -281,5 +549,32 @@ mod tests {
             backend.read("/hello.txt", 0, 1024).await.expect("read"),
             b"hello from rustfs\n"
         );
+
+        // Write path: create → write → truncate → rename → read → remove, on a
+        // scratch key so the test leaves the bucket as it found it.
+        backend
+            .create("/scratch.txt", EntryKind::File)
+            .await
+            .unwrap();
+        backend.write("/scratch.txt", 0, b"hello").await.unwrap();
+        backend.write("/scratch.txt", 5, b" there!").await.unwrap();
+        assert_eq!(backend.stat("/scratch.txt").await.unwrap().size, 12);
+        backend.truncate("/scratch.txt", 5).await.unwrap();
+        backend
+            .rename("/scratch.txt", "/scratch2.txt")
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.read("/scratch2.txt", 0, 1024).await.unwrap(),
+            b"hello"
+        );
+        backend
+            .remove("/scratch2.txt", EntryKind::File)
+            .await
+            .unwrap();
+        assert!(matches!(
+            backend.stat("/scratch2.txt").await,
+            Err(StorageError::NotFound)
+        ));
     }
 }

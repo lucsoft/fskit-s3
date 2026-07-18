@@ -40,6 +40,12 @@ pub type FSItemType = isize;
 pub const FS_ITEM_TYPE_FILE: FSItemType = 1;
 pub const FS_ITEM_TYPE_DIRECTORY: FSItemType = 2;
 
+/// `FSItemAttribute` (NS_OPTIONS(NSUInteger)) — one bit per attribute, in the
+/// header's declaration order (`type`=1<<0, `mode`=1<<1, …). We only need `size`
+/// (the 7th bit) to detect a truncate request in `setAttributes:`.
+pub type FSItemAttribute = usize;
+pub const FS_ITEM_ATTRIBUTE_SIZE: FSItemAttribute = 1 << 6;
+
 /// `FSItemID` (NS_ENUM(UInt64)).
 pub type FSItemID = u64;
 pub const FS_ITEM_ID_ROOT_DIRECTORY: FSItemID = 2;
@@ -164,6 +170,15 @@ impl FSItemAttributes {
     extern_methods!(
         #[unsafe(method(new))]
         pub fn new() -> Retained<FSItemAttributes>;
+
+        /// The `size` attribute (inherited by `FSItemSetAttributesRequest`), read
+        /// when the client requests a truncate.
+        #[unsafe(method(size))]
+        pub fn size(&self) -> u64;
+        /// Whether `attribute` was actually set on this request — used to tell a
+        /// real size change from an untouched field in `setAttributes:`.
+        #[unsafe(method(isValid:))]
+        pub fn isValid(&self, attribute: FSItemAttribute) -> bool;
 
         #[unsafe(method(setType:))]
         pub fn setType(&self, value: FSItemType);

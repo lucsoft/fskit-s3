@@ -104,6 +104,10 @@ pub enum StorageError {
     NotAFile,
     /// A directory operation targeted something that is a file.
     NotADirectory,
+    /// A create targeted a path that already exists.
+    AlreadyExists,
+    /// A directory removal targeted a directory that still has children.
+    NotEmpty,
     /// The path or a request parameter was malformed.
     InvalidPath(String),
     /// Anything backend-specific: HTTP failure, auth error, XML parse, I/O.
@@ -116,6 +120,8 @@ impl fmt::Display for StorageError {
             StorageError::NotFound => write!(f, "not found"),
             StorageError::NotAFile => write!(f, "not a file"),
             StorageError::NotADirectory => write!(f, "not a directory"),
+            StorageError::AlreadyExists => write!(f, "already exists"),
+            StorageError::NotEmpty => write!(f, "directory not empty"),
             StorageError::InvalidPath(p) => write!(f, "invalid path: {p}"),
             StorageError::Backend(msg) => write!(f, "backend error: {msg}"),
         }
@@ -146,4 +152,38 @@ pub trait StorageBackend: Send + Sync {
     /// A short read (fewer than `len` bytes) signals end-of-file and is not an
     /// error. Returns [`StorageError::NotAFile`] for a directory.
     async fn read(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, StorageError>;
+
+    // ---- mutating operations ------------------------------------------------
+    //
+    // Object stores have no partial-write, append, or atomic-rename primitives:
+    // a key is written or copied whole. So `write`/`truncate` are read-modify-
+    // write of the entire object and `rename` is copy-then-delete. That is
+    // O(object size) per call (and O(n²) for a large file written in many small
+    // chunks) — correct and simple, the deliberate first cut. A future
+    // optimization can buffer a file's writes per open handle and flush once.
+
+    /// Create an empty file, or a directory, at `path`.
+    ///
+    /// Returns [`StorageError::AlreadyExists`] if a file or directory already
+    /// exists there.
+    async fn create(&self, path: &str, kind: EntryKind) -> Result<(), StorageError>;
+
+    /// Write `data` starting at `offset`, extending the file (zero-filling any
+    /// gap between the old end and `offset`) as needed. The whole slice is
+    /// written on success. Returns [`StorageError::NotAFile`] for a directory.
+    async fn write(&self, path: &str, offset: u64, data: &[u8]) -> Result<(), StorageError>;
+
+    /// Truncate or zero-extend a file to exactly `len` bytes.
+    async fn truncate(&self, path: &str, len: u64) -> Result<(), StorageError>;
+
+    /// Remove a file, or an empty directory, at `path`. `kind` says which is
+    /// expected (the FSKit side always knows from the item it holds).
+    ///
+    /// Returns [`StorageError::NotEmpty`] if `path` is a directory that still
+    /// has children.
+    async fn remove(&self, path: &str, kind: EntryKind) -> Result<(), StorageError>;
+
+    /// Rename `from` to `to`, moving the whole subtree if `from` is a directory.
+    /// An existing file at `to` is overwritten.
+    async fn rename(&self, from: &str, to: &str) -> Result<(), StorageError>;
 }
