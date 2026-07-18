@@ -35,6 +35,7 @@
 mod addwindow;
 mod appkit;
 mod connection;
+mod devlog;
 mod keychain;
 mod mounts;
 mod s3check;
@@ -262,6 +263,9 @@ fn main() {
         eprintln!("[app] must run on the main thread");
         return;
     };
+
+    // Debug builds tail the extension's unified log to this terminal.
+    devlog::start();
 
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
