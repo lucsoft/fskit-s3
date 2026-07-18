@@ -1,23 +1,22 @@
 //! `fskit-s3-app` — the macOS app for managing fskit-s3 connections and mounts.
 //!
-//! A status-bar app whose dropdown lists the configured **connections** (each
-//! with a *Mount* action) and the currently mounted **volumes** (each with an
-//! *Unmount* action), plus *Quit*. The menu rebuilds itself every time it opens
-//! (via the `NSMenuDelegate` hook), so the mount list is always current — no
-//! manual refresh. It owns the whole stack:
+//! A status-bar app whose dropdown offers *Add mount…*, lists the configured
+//! **connections** (each with a *Mount* action) and the currently mounted
+//! **volumes** (each with an *Unmount* action), plus *Quit*. The menu rebuilds
+//! itself on every open (via the `NSMenuDelegate` hook) and reloads the registry
+//! from disk, so it's always current. It owns the whole stack:
 //!
-//! - [`connection`] — the `Connection`/`ConnectionKind`/`Registry` model (a
-//!   connection is a mountable endpoint; today only the in-memory demo, held in
-//!   an in-memory registry).
-//! - [`mounts`] — the mount table + `mount`/`unmount` actions. There is no bespoke
-//!   CLI: mounting is the system `mount` tool with the connection's `-o` options,
-//!   so the app (and a human at a terminal) drive the same command.
+//! - [`connection`] — the `Connection`/`ConnectionKind` (`Memory` / `S3`) model +
+//!   the persisted `Registry` (`connections.json`, never holding a secret).
+//! - [`keychain`] — the S3 secret in the macOS Keychain (secure path).
+//! - [`s3check`] — the "Test and Save" credential check (lists the bucket).
+//! - [`mounts`] — the mount table + `mount`/`unmount`. No bespoke CLI: mounting is
+//!   the system `mount` tool with the connection's `-o` options.
+//! - [`addwindow`] — the Add-mount form + the password prompt (native `NSWindow`).
 //! - [`appkit`] — checked wrappers over the AppKit calls, where the FFI lives.
 //!
-//! The `connection`/`mounts` modules are pure Rust and unit-tested; the app just
-//! adds the UI. Runs as an `Accessory` app (no Dock tile). A connection-config UI
-//! (add/edit S3 endpoints) arrives with real connections — there's nothing to
-//! configure while the only connection is the built-in demo.
+//! The `connection`/`keychain`/`s3check`/`mounts` modules are pure Rust; the app
+//! adds the UI. Runs as an `Accessory` app (no Dock tile).
 
 // The app must not panic in normal operation: no unwrap/expect/panic/indexing
 // outside tests. Enforced by clippy in CI.
@@ -32,9 +31,12 @@
     )
 )]
 
+mod addwindow;
 mod appkit;
 mod connection;
+mod keychain;
 mod mounts;
+mod s3check;
 
 use connection::Registry;
 use objc2::rc::Retained;
@@ -45,11 +47,11 @@ use objc2_app_kit::{
     NSStatusItem, NSVariableStatusItemLength,
 };
 
-/// Rust state carried on the ObjC controller instance.
+/// Rust state carried on the ObjC controller instance. The connection registry is
+/// *not* held here — it's reloaded from disk on each menu open + mount action, so
+/// changes made in the Add-mount window are always reflected.
 struct Ivars {
     status_item: Retained<NSStatusItem>,
-    /// The configured connections (in-memory for now; see [`connection`]).
-    registry: Registry,
 }
 
 define_class!(
@@ -67,11 +69,26 @@ define_class!(
             let Some(name) = appkit::represented_string(item) else {
                 return;
             };
-            let Some(conn) = self.ivars().registry.get(&name) else {
+            let registry = Registry::load();
+            let Some(conn) = registry.get(&name) else { return };
+
+            // S3 with no stored secret: prompt for it (the ext can't). Otherwise
+            // mount with no `-o secret` — the ext reads the Keychain by name.
+            if conn.is_s3() && keychain::read_secret(&name).is_none() {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    addwindow::open_password(mtm, conn.clone());
+                }
                 return;
-            };
-            if let Err(e) = mounts::mount(conn, &conn.default_mount_point()) {
+            }
+            if let Err(e) = mounts::mount(conn, &conn.default_mount_point(), None) {
                 eprintln!("[app] mount {name} failed: {e}");
+            }
+        }
+
+        #[unsafe(method(addMount:))]
+        fn add_mount_action(&self, _sender: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                addwindow::open(mtm);
             }
         }
 
@@ -106,10 +123,7 @@ define_class!(
 
 impl Controller {
     fn new(mtm: MainThreadMarker, status_item: Retained<NSStatusItem>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(Ivars {
-            status_item,
-            registry: Registry::with_defaults(),
-        });
+        let this = Self::alloc(mtm).set_ivars(Ivars { status_item });
         // SAFETY: `this` is a fresh alloc()+set_ivars, not yet initialized — the precondition of NSObject's designated `-init`.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
 
@@ -130,7 +144,19 @@ impl Controller {
         appkit::clear_menu(menu);
         let target: &AnyObject = self;
 
-        // Connections — each mountable.
+        // Add a new connection.
+        menu.addItem(&appkit::menu_item(
+            mtm,
+            "Add mount…",
+            Some(sel!(addMount:)),
+            Some(target),
+            None,
+            true,
+        ));
+        menu.addItem(&appkit::separator(mtm));
+
+        // Connections — each mountable. Reloaded from disk so the Add-mount window's
+        // changes show up immediately.
         menu.addItem(&appkit::menu_item(
             mtm,
             "Connections",
@@ -139,7 +165,7 @@ impl Controller {
             None,
             false,
         ));
-        for c in self.ivars().registry.list() {
+        for c in Registry::load().list() {
             menu.addItem(&appkit::menu_item(
                 mtm,
                 &format!("Mount  {}  ({})", c.name, c.kind.label()),
@@ -182,6 +208,23 @@ impl Controller {
     }
 }
 
+/// Mount every connection flagged `mount_on_launch`. S3 connections whose secret
+/// isn't in the Keychain are skipped (a prompt can't run unattended at launch).
+fn mount_on_launch() {
+    for conn in Registry::load().list() {
+        if !conn.mount_on_launch {
+            continue;
+        }
+        if conn.is_s3() && keychain::read_secret(&conn.name).is_none() {
+            eprintln!("[app] skip auto-mount {}: no stored secret", conn.name);
+            continue;
+        }
+        if let Err(e) = mounts::mount(conn, &conn.default_mount_point(), None) {
+            eprintln!("[app] auto-mount {} failed: {e}", conn.name);
+        }
+    }
+}
+
 fn main() {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("[app] must run on the main thread");
@@ -197,6 +240,8 @@ fn main() {
 
     // The controller owns the status item + menu; keep it alive for the whole run.
     let controller = Controller::new(mtm, status_item);
+
+    mount_on_launch();
 
     app.run();
     drop(controller);

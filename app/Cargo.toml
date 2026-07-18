@@ -14,6 +14,18 @@ name = "fskit-s3-app"
 path = "src/main.rs"
 
 [dependencies]
+# Connection persistence: the app-local connections.json (never holds secrets).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Keychain: stores the S3 secret (optionally in a shared access group the ext reads).
+security-framework = "3"
+
+# "Test and Save": validate S3 credentials by listing the bucket via OpenDAL.
+fskit-s3-core = { workspace = true }
+fskit-s3-backend = { workspace = true }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread"] }
+
 # The objc2 crates gate every class behind a like-named feature, and their
 # `default` turns the *whole* framework on. We disable defaults and re-enable only
 # what this app touches — a much smaller compile surface, and a precise record of
@@ -23,11 +35,11 @@ path = "src/main.rs"
 # only default feature is `std`, which we keep.
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
 
-# Foundation: only `NSString` (menu titles + represented objects). `std` provides
-# the NSString <-> Rust `String` bridging (`from_str` / `to_string`).
+# Foundation: NSString bridging + NSGeometry (NSRect/NSPoint/NSSize for control frames).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
+    "NSGeometry",
 ] }
 
 # AppKit: just the status-bar menu classes. objc2 gates each type/method behind
@@ -45,8 +57,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSStatusBar",          # systemStatusBar() + NSVariableStatusItemLength
     "NSStatusItem",         # the menu-bar item (statusItemWithLength / setMenu)
     "NSStatusBarButton",    # the status button; setTitle draws the ☁ glyph
+    # The Add-mount window + its form controls:
+    "NSWindow",             # the form window
+    "NSGraphics",           # NSBackingStoreType (window initializer)
+    "NSTextField",          # labels + editable fields
+    "NSSecureTextField",    # the secret field (bullets)
+    "NSPopUpButton",        # the In-memory/S3 type selector
+    "NSCell",               # NSControlStateValue{On,Off} for checkbox state
     # Superclass chain the above are gated on (NSStatusBarButton → NSButton →
-    # NSControl → NSView → NSResponder; NSApplication → NSResponder):
+    # NSControl → NSView → NSResponder; NSApplication/NSWindow → NSResponder):
     "NSButton",
     "NSControl",
     "NSView",

@@ -63,21 +63,27 @@ pub fn list_fskit() -> Vec<Mount> {
 ///
 /// Ensures the connection's resource directory and the mount point exist, then
 /// runs `mount -F -t fskit-s3 [-o <opts>] <resource> <mount_point>`, where
-/// `<opts>` is the connection's [`mount_options`](Connection::mount_options) —
-/// the seam that carries per-connection config (empty for the demo). Requires the
-/// FSKit extension to be installed and enabled; if it isn't, `mount` fails and
-/// its stderr is returned unchanged.
-pub fn mount(conn: &Connection, mount_point: &Path) -> Result<(), String> {
+/// `<opts>` is the connection's [`mount_options`](Connection::mount_options)
+/// (per-connection config, empty for the memory demo). When `secret` is supplied
+/// it's appended as `secret=…` — the **insecure** path, only for connections whose
+/// secret isn't in the Keychain (the ext prefers `Keychain[name]`). Requires the
+/// FSKit extension to be installed and enabled; if it isn't, `mount` fails and its
+/// stderr is returned unchanged.
+pub fn mount(conn: &Connection, mount_point: &Path, secret: Option<&str>) -> Result<(), String> {
     let source = conn.source_dir();
     fs::create_dir_all(&source)
         .map_err(|e| format!("create resource dir {}: {e}", source.display()))?;
     fs::create_dir_all(mount_point)
         .map_err(|e| format!("create mount point {}: {e}", mount_point.display()))?;
 
+    let mut options = conn.mount_options();
+    if let Some(secret) = secret {
+        options.push(("secret".to_string(), secret.to_string()));
+    }
+
     let mut cmd = Command::new("/sbin/mount");
     cmd.args(["-F", "-t", FS_TYPE]);
-    let opts = format_options(&conn.mount_options());
-    if let Some(opts) = opts {
+    if let Some(opts) = format_options(&options) {
         cmd.arg("-o").arg(opts);
     }
     let out = cmd

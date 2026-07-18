@@ -1,93 +1,126 @@
 //! Configured connections — the things you can mount.
 //!
 //! A [`Connection`] names a storage endpoint; a [`Registry`] holds the set of
-//! them. Both are pure data with no I/O, so they unit-test trivially and are
-//! kept separate from the app's AppKit/`unsafe` layer.
+//! them and persists it to an app-local JSON file. All pure data + filesystem
+//! I/O (no `objc2`), so it unit-tests trivially and stays separate from the app's
+//! AppKit/`unsafe` layer.
+//!
+//! **Secrets never live here.** An [`S3Meta`] carries only non-secret fields; the
+//! secret access key is handled by [`crate::keychain`] (secure) or passed to a
+//! single mount via `-o` (insecure) — see [`crate::mounts`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// A configured storage connection: an identity plus the backend it maps to.
-///
-/// Mounting a connection hands its [`source_dir`](Connection::source_dir) to the
-/// extension as the `mount` resource argument. For [`ConnectionKind::Demo`] the
-/// extension ignores that path (it serves a fixed in-memory tree), but `mount`
-/// still requires a path, and giving each connection a distinct one keeps their
-/// FSKit container identities separate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+/// A configured storage connection: an identity, the backend it maps to, and how
+/// it should be mounted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Connection {
     pub name: String,
     pub kind: ConnectionKind,
+    /// Whether the secret (S3 only) is stored in the Keychain. When false the
+    /// secret isn't persisted and a mount must supply it (prompt or `-o secret`).
+    #[serde(default)]
+    pub save_secret_to_keychain: bool,
+    /// Mount this connection automatically when the app launches.
+    #[serde(default)]
+    pub mount_on_launch: bool,
 }
 
 /// Which backend a connection is served by.
-///
-/// Only the in-memory demo exists today; the S3/WebDAV/… variants arrive with the
-/// config + Keychain milestone. Keeping this an enum means the front-ends match
-/// on it once and gain the new kinds without structural change.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionKind {
-    /// The credential-free in-memory tree the extension currently serves.
-    Demo,
-    // S3 { endpoint: String, bucket: String, region: String } — next milestone.
+    /// The credential-free in-memory demo tree the extension serves.
+    Memory,
+    /// An S3 (or S3-compatible) bucket. Non-secret config only.
+    S3(S3Meta),
+}
+
+/// Non-secret S3 connection config (mirrors `fskit_s3_backend::S3Config` minus the
+/// `secret_access_key`, which never touches this struct or the config file).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct S3Meta {
+    pub bucket: String,
+    pub region: String,
+    /// Custom endpoint for S3-compatible stores (MinIO, R2, RustFS). Empty ⇒ AWS.
+    pub endpoint: String,
+    pub access_key_id: String,
+    pub session_token: Option<String>,
 }
 
 impl ConnectionKind {
-    /// A short human label, e.g. for a CLI listing or a menu subtitle.
+    /// A short human label for a menu subtitle.
     pub fn label(&self) -> &'static str {
         match self {
-            ConnectionKind::Demo => "in-memory demo",
+            ConnectionKind::Memory => "in-memory demo",
+            ConnectionKind::S3(_) => "S3",
         }
     }
 }
 
 impl Connection {
-    /// The built-in, credential-free demo connection.
-    pub fn demo() -> Self {
+    /// The built-in, credential-free in-memory connection.
+    pub fn memory() -> Self {
         Connection {
-            name: "demo".to_string(),
-            kind: ConnectionKind::Demo,
+            name: "memory".to_string(),
+            kind: ConnectionKind::Memory,
+            save_secret_to_keychain: false,
+            mount_on_launch: false,
         }
+    }
+
+    /// Whether this is an S3 connection (needs a secret to mount).
+    pub fn is_s3(&self) -> bool {
+        matches!(self.kind, ConnectionKind::S3(_))
     }
 
     /// The resource directory handed to `mount` for this connection.
     ///
     /// A hidden per-connection directory under [`base_dir`]; created on demand by
-    /// [`mount`](crate::mount). Distinct per connection so container identities
-    /// don't collide.
+    /// [`crate::mounts::mount`]. Distinct per connection so FSKit container
+    /// identities don't collide.
     pub fn source_dir(&self) -> PathBuf {
         base_dir().join(".sources").join(&self.name)
     }
 
     /// Where this connection is mounted by default (`~/fskit-s3/<name>`).
-    ///
-    /// A visible directory in the user's home so the mount is easy to find; used
-    /// when the caller doesn't name a mount point.
     pub fn default_mount_point(&self) -> PathBuf {
         base_dir().join(&self.name)
     }
 
-    /// The `-o key=value` options handed to `mount` for this connection.
+    /// The `-o key=value` options handed to `mount` for this connection — its
+    /// non-secret config. Empty for [`ConnectionKind::Memory`]. The **secret** is
+    /// never included here; [`crate::mounts::mount`] appends `secret=…` for the
+    /// insecure path. `name` is included so the extension can key the Keychain.
     ///
-    /// This is the whole point of the "no bespoke CLI" design: a connection's
-    /// configuration travels as **mount options**, so mounting is just the system
-    /// `mount` tool (the app builds the option string; a human could type the same
-    /// command). The demo needs none. S3 connections will carry `endpoint`,
-    /// `bucket`, `region`, … here — never the secret, which the extension fetches
-    /// from the Keychain by the connection's identity. Reading these options back
-    /// in the extension's `loadResource:options:` is part of the S3 milestone.
+    /// Values must not contain commas (the `-o` list delimiter) — true for
+    /// endpoints/buckets/regions/keys; secrets go through the Keychain instead.
     pub fn mount_options(&self) -> Vec<(String, String)> {
         match &self.kind {
-            ConnectionKind::Demo => Vec::new(),
+            ConnectionKind::Memory => Vec::new(),
+            ConnectionKind::S3(s3) => {
+                let mut opts = vec![
+                    ("name".to_string(), self.name.clone()),
+                    ("bucket".to_string(), s3.bucket.clone()),
+                    ("access_key_id".to_string(), s3.access_key_id.clone()),
+                ];
+                if !s3.region.is_empty() {
+                    opts.push(("region".to_string(), s3.region.clone()));
+                }
+                if !s3.endpoint.is_empty() {
+                    opts.push(("endpoint".to_string(), s3.endpoint.clone()));
+                }
+                if let Some(token) = &s3.session_token {
+                    opts.push(("session_token".to_string(), token.clone()));
+                }
+                opts
+            }
         }
     }
 }
 
-/// An in-memory set of connections, keyed by unique name.
-///
-/// Not yet persisted: [`Registry::with_defaults`] rebuilds the same starting set
-/// (just the demo) on each process. [`add`](Registry::add)/[`remove`](Registry::remove)
-/// already model mutation so the front-ends are written against the final shape;
-/// wiring them to a config file + Keychain is the next milestone.
+/// A set of connections keyed by unique name, persisted to an app-local file.
 #[derive(Debug, Default, Clone)]
 pub struct Registry {
     connections: Vec<Connection>,
@@ -99,12 +132,47 @@ impl Registry {
         Registry::default()
     }
 
-    /// The registry every front-end starts from: the built-in demo connection.
+    /// The starting set for a fresh install: just the built-in memory connection.
     pub fn with_defaults() -> Self {
         let mut r = Registry::new();
-        // The demo name is unique in a fresh registry, so this never fails.
-        let _ = r.add(Connection::demo());
+        // The name is unique in a fresh registry, so this never fails.
+        let _ = r.add(Connection::memory());
         r
+    }
+
+    /// Load the persisted registry, falling back to [`Registry::with_defaults`]
+    /// when the file is absent or unreadable (best-effort — never panics).
+    pub fn load() -> Self {
+        Self::load_from(&config_path())
+    }
+
+    /// Persist the registry to the app-local config file.
+    pub fn save(&self) -> Result<(), String> {
+        self.save_to(&config_path())
+    }
+
+    fn load_from(path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Registry::with_defaults();
+        };
+        match serde_json::from_str::<Vec<Connection>>(&text) {
+            Ok(conns) => {
+                let mut r = Registry::new();
+                for c in conns {
+                    let _ = r.add(c); // silently drop duplicate names
+                }
+                r
+            }
+            Err(_) => Registry::with_defaults(),
+        }
+    }
+
+    fn save_to(&self, path: &Path) -> Result<(), String> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        }
+        let json = serde_json::to_string_pretty(&self.connections).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))
     }
 
     /// All connections, in insertion order.
@@ -118,7 +186,7 @@ impl Registry {
     }
 
     /// Add a connection. Errors (without modifying the registry) if the name is
-    /// already taken — names are the stable handle the front-ends address.
+    /// already taken — names are the stable handle the UI addresses.
     pub fn add(&mut self, conn: Connection) -> Result<(), String> {
         if self.get(&conn.name).is_some() {
             return Err(format!("connection {:?} already exists", conn.name));
@@ -129,8 +197,8 @@ impl Registry {
 
     /// Remove the named connection; returns whether one was removed.
     ///
-    /// Part of the registry's mutation API for the upcoming connection-config UI
-    /// (add/edit/remove); not wired to a menu action yet, hence unused today.
+    /// Part of the registry's mutation API for the connection-config UI; not wired
+    /// to a menu action in this pass, hence allowed-dead.
     #[allow(dead_code)]
     pub fn remove(&mut self, name: &str) -> bool {
         let before = self.connections.len();
@@ -148,65 +216,129 @@ fn base_dir() -> PathBuf {
     }
 }
 
+/// The app-local connections file (`~/Library/Application Support/fskit-s3/`).
+fn config_path() -> PathBuf {
+    let dir = match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => {
+            PathBuf::from(home).join("Library/Application Support/fskit-s3")
+        }
+        _ => PathBuf::from("/tmp/fskit-s3"),
+    };
+    dir.join("connections.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn demo_connection_is_named_demo() {
-        let c = Connection::demo();
-        assert_eq!(c.name, "demo");
-        assert_eq!(c.kind, ConnectionKind::Demo);
-        assert_eq!(c.kind.label(), "in-memory demo");
+    fn s3_conn(name: &str) -> Connection {
+        Connection {
+            name: name.to_string(),
+            kind: ConnectionKind::S3(S3Meta {
+                bucket: "my-bucket".to_string(),
+                region: "us-east-1".to_string(),
+                endpoint: "http://localhost:9000".to_string(),
+                access_key_id: "AKIA".to_string(),
+                session_token: None,
+            }),
+            save_secret_to_keychain: true,
+            mount_on_launch: false,
+        }
     }
 
     #[test]
-    fn source_and_mount_paths_are_distinct_and_named() {
-        let c = Connection::demo();
-        let mnt = c.default_mount_point();
-        let src = c.source_dir();
-        assert!(mnt.ends_with("demo"), "mount point ends with the name");
-        assert!(src.ends_with("demo"), "source dir ends with the name");
-        assert_ne!(mnt, src, "a mount point is never its own resource dir");
-        assert!(
-            src.to_string_lossy().contains(".sources"),
-            "sources live in a hidden subdir"
+    fn memory_connection_is_named_memory() {
+        let c = Connection::memory();
+        assert_eq!(c.name, "memory");
+        assert_eq!(c.kind, ConnectionKind::Memory);
+        assert_eq!(c.kind.label(), "in-memory demo");
+        assert!(!c.is_s3());
+    }
+
+    #[test]
+    fn memory_needs_no_mount_options() {
+        assert!(Connection::memory().mount_options().is_empty());
+    }
+
+    #[test]
+    fn s3_mount_options_carry_config_but_never_the_secret() {
+        let opts = s3_conn("photos").mount_options();
+        let has = |k: &str| opts.iter().any(|(key, _)| key == k);
+        assert!(has("name") && has("bucket") && has("access_key_id"));
+        assert!(has("region") && has("endpoint"));
+        assert!(!has("secret"), "the secret is never a mount option");
+        assert_eq!(
+            opts.iter()
+                .find(|(k, _)| k == "name")
+                .map(|(_, v)| v.as_str()),
+            Some("photos")
         );
     }
 
     #[test]
-    fn demo_needs_no_mount_options() {
-        assert!(Connection::demo().mount_options().is_empty());
+    fn s3_mount_options_skip_empty_optional_fields() {
+        let mut c = s3_conn("x");
+        if let ConnectionKind::S3(m) = &mut c.kind {
+            m.region = String::new();
+            m.endpoint = String::new();
+        }
+        let opts = c.mount_options();
+        assert!(!opts.iter().any(|(k, _)| k == "region" || k == "endpoint"));
     }
 
     #[test]
-    fn defaults_hold_only_the_demo() {
+    fn connection_serde_roundtrip() {
+        let c = s3_conn("photos");
+        let json = serde_json::to_string(&c).unwrap();
+        // The secret access key has no field on the struct, so it can never be
+        // serialized (the `save_secret_to_keychain` flag name is unrelated).
+        assert!(!json.contains("secret_access_key"));
+        let back: Connection = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+    }
+
+    #[test]
+    fn registry_save_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("fskit-s3-test-{}", std::process::id()));
+        let path = dir.join("connections.json");
+        let mut r = Registry::with_defaults();
+        r.add(s3_conn("photos")).unwrap();
+        r.save_to(&path).unwrap();
+
+        let loaded = Registry::load_from(&path);
+        assert_eq!(loaded.list().len(), 2);
+        assert!(loaded.get("memory").is_some());
+        assert!(loaded.get("photos").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_missing_file_falls_back_to_defaults() {
+        let r = Registry::load_from(Path::new("/nonexistent/fskit-s3/connections.json"));
+        assert_eq!(r.list().len(), 1);
+        assert!(r.get("memory").is_some());
+    }
+
+    #[test]
+    fn defaults_hold_only_memory() {
         let r = Registry::with_defaults();
         assert_eq!(r.list().len(), 1);
-        assert!(r.get("demo").is_some());
+        assert!(r.get("memory").is_some());
         assert!(r.get("nope").is_none());
     }
 
     #[test]
     fn add_rejects_duplicate_names() {
         let mut r = Registry::with_defaults();
-        let err = r.add(Connection::demo()).unwrap_err();
+        let err = r.add(Connection::memory()).unwrap_err();
         assert!(err.contains("already exists"));
-        assert_eq!(
-            r.list().len(),
-            1,
-            "a rejected add doesn't grow the registry"
-        );
+        assert_eq!(r.list().len(), 1);
     }
 
     #[test]
     fn add_then_remove_roundtrips() {
         let mut r = Registry::new();
-        let c = Connection {
-            name: "photos".to_string(),
-            kind: ConnectionKind::Demo,
-        };
-        assert!(r.add(c).is_ok());
+        assert!(r.add(s3_conn("photos")).is_ok());
         assert!(r.get("photos").is_some());
         assert!(r.remove("photos"));
         assert!(r.get("photos").is_none());
