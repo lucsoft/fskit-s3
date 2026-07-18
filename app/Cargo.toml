@@ -68,6 +68,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSCell",               # NSControlStateValue{On,Off} for checkbox state
     "NSColor",              # systemRed bezel for the destructive Delete button
     "NSAlert",              # the "delete this connection?" confirmation
+    "NSParagraphStyle",     # NSLineBreakMode + setLineBreakMode (wrapping status label)
     # Superclass chain the above are gated on (NSStatusBarButton → NSButton →
     # NSControl → NSView → NSResponder; NSApplication/NSWindow → NSResponder):
     "NSButton",

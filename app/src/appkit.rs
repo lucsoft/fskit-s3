@@ -12,8 +12,8 @@ use objc2::{sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSAutoresizingMaskOptions,
     NSBackingStoreType, NSButton, NSColor, NSControl, NSControlStateValueOff,
-    NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton, NSSecureTextField,
-    NSStatusItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSControlStateValueOn, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton,
+    NSSecureTextField, NSStatusItem, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
@@ -199,6 +199,18 @@ pub fn close_window(window: &NSWindow) {
 pub fn label(mtm: MainThreadMarker, frame: NSRect, text: &str) -> Retained<NSTextField> {
     let f = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     f.setFrame(frame);
+    f
+}
+
+/// A multi-line label that word-wraps to its frame width instead of clipping.
+/// Used for status/validation messages whose length isn't known up front.
+pub fn wrapping_label(mtm: MainThreadMarker, frame: NSRect, text: &str) -> Retained<NSTextField> {
+    let f = label(mtm, frame, text);
+    // `labelWithString:` returns a single-line label; opt into wrapping so long
+    // messages flow onto additional lines within the frame.
+    f.setUsesSingleLineMode(false);
+    f.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    f.setMaximumNumberOfLines(0);
     f
 }
 

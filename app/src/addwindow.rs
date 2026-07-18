@@ -369,7 +369,7 @@ fn open_form(mtm: MainThreadMarker, existing: Option<Connection>) {
     );
     appkit::set_checkbox_on(&mount_launch, init_mount_launch);
     add_bottom(&mount_launch);
-    let status = appkit::label(mtm, appkit::rect(20.0, 56.0, 340.0, 44.0), "");
+    let status = appkit::wrapping_label(mtm, appkit::rect(20.0, 56.0, 340.0, 44.0), "");
     add_bottom(&status);
     let cancel = appkit::push_button(mtm, appkit::rect(150.0, 14.0, 100.0, 32.0), "Cancel");
     add_bottom(&cancel);
