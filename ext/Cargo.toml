@@ -19,13 +19,24 @@ fskit-s3-core = { workspace = true, features = ["mem"] }
 # dependency yet. The demo mount uses the in-memory backend, so the staticlib
 # links only FSKit + Foundation + libSystem — no Security/SystemConfiguration
 # framework juggling in Xcode. Add it back when wiring the S3 backend + Keychain.
-tokio = { version = "1", features = ["rt-multi-thread"] }
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = [
-    "NSString",
-    "NSData",
-    "NSError",
-    "NSUUID",
+# The multi-threaded runtime the ext spawns backend futures on. tokio has no
+# default features, so `rt-multi-thread` (which pulls in `rt`) is the whole ask.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread"] }
+# objc2 core: extern_class!/extern_protocol!/define_class!, msg_send!, Retained.
+# `std` is objc2's only default feature.
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+# Foundation types the FSKit bindings pass around.
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",     # FSFileName / names + volume label
+    "NSData",       # icon/buffer payloads across the FSKit boundary
+    "NSError",      # error replies to FSKit
+    "NSUUID",       # container + volume identifiers
+    # NSError::errorWithDomain:code:userInfo: is gated on the Foundation `NSObject`
+    # category and takes an NSDictionary userInfo, so both are required to build it.
+    "NSObject",
+    "NSDictionary",
 ] }
-block2 = "0.6"
+# `DynBlock` — FSKit's reply handlers are ObjC blocks. `std` is block2's default.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
 libc = "0.2"

@@ -14,8 +14,41 @@ name = "fskit-s3-app"
 path = "src/main.rs"
 
 [dependencies]
-objc2 = "0.6"
-objc2-foundation = "0.3"
-# Default features enable the AppKit classes we use (NSApplication, NSStatusItem,
-# NSMenu, …); picking them individually is brittle across point releases.
-objc2-app-kit = "0.3"
+# The objc2 crates gate every class behind a like-named feature, and their
+# `default` turns the *whole* framework on. We disable defaults and re-enable only
+# what this app touches — a much smaller compile surface, and a precise record of
+# what the app actually depends on.
+
+# objc2 core: `define_class!`, `msg_send!`, `Retained`, `MainThreadMarker`. The
+# only default feature is `std`, which we keep.
+objc2 = { version = "0.6", default-features = false, features = ["std"] }
+
+# Foundation: only `NSString` (menu titles + represented objects). `std` provides
+# the NSString <-> Rust `String` bridging (`from_str` / `to_string`).
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+] }
+
+# AppKit: just the status-bar menu classes. objc2 gates each type/method behind
+# `cfg(all(feature = "Self", feature = "Super", …))`, so besides the classes we
+# name we must also enable their whole superclass chain and the CGFloat support.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    # CGFloat-typed APIs: statusItemWithLength + NSVariableStatusItemLength.
+    "objc2-core-foundation",
+    # Classes we use directly:
+    "NSApplication",        # the app object (setActivationPolicy)
+    "NSRunningApplication", # defines NSApplicationActivationPolicy (Accessory)
+    "NSMenu",               # the dropdown
+    "NSMenuItem",           # its rows (+ separators)
+    "NSStatusBar",          # systemStatusBar() + NSVariableStatusItemLength
+    "NSStatusItem",         # the menu-bar item (statusItemWithLength / setMenu)
+    "NSStatusBarButton",    # the status button; setTitle draws the ☁ glyph
+    # Superclass chain the above are gated on (NSStatusBarButton → NSButton →
+    # NSControl → NSView → NSResponder; NSApplication → NSResponder):
+    "NSButton",
+    "NSControl",
+    "NSView",
+    "NSResponder",
+] }

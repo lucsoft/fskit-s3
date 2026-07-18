@@ -237,3 +237,12 @@ before investing. Current target is the general bucket mount.
 - **Wrap `unsafe` in checked safe functions.** All `objc2`/FFI `unsafe` (ext,
   app) lives behind a small safe wrapper that validates arguments and
   null/again-checks results; callers never write `unsafe` directly.
+- **Pin dependency features; no `default-features`.** Every dependency sets
+  `default-features = false` and lists exactly the features used, each annotated
+  with why. This matters most for the `objc2` crates: `default` turns on the whole
+  framework, and objc2 gates each type/method behind `cfg(all(feature = "Self",
+  feature = "Super", …))`, so a class also needs its full superclass chain (e.g.
+  `NSStatusBarButton` → `NSButton` → `NSControl` → `NSView` → `NSResponder`) and
+  any cross-cutting feature its signatures touch (`objc2-core-foundation` for
+  `CGFloat`; `NSDictionary` for `NSError`'s `userInfo:`). When adding a call,
+  build and let the unresolved-import/`no method` errors name the missing feature.
