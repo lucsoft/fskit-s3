@@ -217,7 +217,9 @@ with its config as `-o` options, so the app and a plain `mount` do the same thin
 ```bash
 cargo run -p fskit-s3-app                # the app
 # …or by hand (what the app runs — the extension needs an explicit `type`):
-mount -F -t fskit-s3 -o type=memory ~/fskit-s3/.sources/memory ~/fskit-s3/memory
+# the mount point doubles as the resource arg (its contents are never read), so
+# the two path args are identical.
+mount -F -t fskit-s3 -o type=memory ~/fskit-s3/memory ~/fskit-s3/memory
 umount ~/fskit-s3/memory
 ```
 

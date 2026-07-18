@@ -37,17 +37,19 @@ config passed as `-o` options, so you can also do it by hand.
 ```sh
 # -F: the filesystem is an FSKit module   -t fskit-s3: which module
 # (macOS `mount` is BSD-style — these flags have no --long-form spelling)
+# The path is repeated: mount needs a resource arg, but its contents are never
+# read (the backend comes from -o), so the mount point serves as its own resource.
 
 # Secret inline — no setup, but insecure (visible in `ps`/`mount`):
 mount -F -t fskit-s3 \
   -o type=s3,name=photos,bucket=my-bucket,access_key_id=AKIA…,region=us-east-1,secret=s3cr3t \
-  ~/fskit-s3/.sources/photos ~/fskit-s3/photos
+  ~/fskit-s3/photos ~/fskit-s3/photos
 
 # …or store the secret in the Keychain (item keyed by `name`), then omit it:
 security add-generic-password -U -s dev.lucsoft.fskit-s3 -a photos -w 's3cr3t'
 mount -F -t fskit-s3 \
   -o type=s3,name=photos,bucket=my-bucket,access_key_id=AKIA…,region=us-east-1 \
-  ~/fskit-s3/.sources/photos ~/fskit-s3/photos
+  ~/fskit-s3/photos ~/fskit-s3/photos
 
 umount ~/fskit-s3/photos
 ```

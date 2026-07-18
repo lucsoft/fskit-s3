@@ -75,16 +75,12 @@ impl Connection {
         matches!(self.kind, ConnectionKind::S3(_))
     }
 
-    /// The resource directory handed to `mount` for this connection.
-    ///
-    /// A hidden per-connection directory under [`base_dir`]; created on demand by
-    /// [`crate::mounts::mount`]. Distinct per connection so FSKit container
-    /// identities don't collide.
-    pub fn source_dir(&self) -> PathBuf {
-        base_dir().join(".sources").join(&self.name)
-    }
-
     /// Where this connection is mounted by default (`~/fskit-s3/<name>`).
+    ///
+    /// This path doubles as the `mount` resource argument: the extension never
+    /// reads the resource's contents (it picks its backend from the `-o`
+    /// options), so the mount point serves as its own resource. It's distinct
+    /// per connection, so FSKit container identities don't collide.
     pub fn default_mount_point(&self) -> PathBuf {
         base_dir().join(&self.name)
     }

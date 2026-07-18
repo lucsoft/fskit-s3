@@ -61,18 +61,18 @@ pub fn list_fskit() -> Vec<Mount> {
 
 /// Mount a connection at `mount_point`.
 ///
-/// Ensures the connection's resource directory and the mount point exist, then
-/// runs `mount -F -t fskit-s3 [-o <opts>] <resource> <mount_point>`, where
-/// `<opts>` is the connection's [`mount_options`](Connection::mount_options)
-/// (per-connection config, empty for the memory demo). When `secret` is supplied
-/// it's appended as `secret=…` — the **insecure** path, only for connections whose
-/// secret isn't in the Keychain (the ext prefers `Keychain[name]`). Requires the
-/// FSKit extension to be installed and enabled; if it isn't, `mount` fails and its
-/// stderr is returned unchanged.
+/// Ensures the mount point exists, then runs
+/// `mount -F -t fskit-s3 [-o <opts>] <mount_point> <mount_point>`, where `<opts>`
+/// is the connection's [`mount_options`](Connection::mount_options)
+/// (per-connection config, empty for the memory demo). The mount point doubles
+/// as the `mount` resource argument — the extension never reads the resource's
+/// contents (it picks its backend from `-o`), so there's no separate resource
+/// directory. When `secret` is supplied it's appended as `secret=…` — the
+/// **insecure** path, only for connections whose secret isn't in the Keychain
+/// (the ext prefers `Keychain[name]`). Requires the FSKit extension to be
+/// installed and enabled; if it isn't, `mount` fails and its stderr is returned
+/// unchanged.
 pub fn mount(conn: &Connection, mount_point: &Path, secret: Option<&str>) -> Result<(), String> {
-    let source = conn.source_dir();
-    fs::create_dir_all(&source)
-        .map_err(|e| format!("create resource dir {}: {e}", source.display()))?;
     fs::create_dir_all(mount_point)
         .map_err(|e| format!("create mount point {}: {e}", mount_point.display()))?;
 
@@ -87,7 +87,7 @@ pub fn mount(conn: &Connection, mount_point: &Path, secret: Option<&str>) -> Res
         cmd.arg("-o").arg(opts);
     }
     let out = cmd
-        .arg(&source)
+        .arg(mount_point)
         .arg(mount_point)
         .output()
         .map_err(|e| e.to_string())?;
