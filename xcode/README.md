@@ -46,8 +46,12 @@ Signing & Capabilities and let automatic signing regenerate the profiles.
 ## Build, install, mount
 
 1. Scheme **fskit-s3-host** ▸ **Build & Run** (this signs + registers the extension).
-2. Enable it: **System Settings ▸ General ▸ Login Items & Extensions ▸ File
-   System Extensions** ▸ turn on *fskit-s3*.
+   The host window is a **live health check** (via `FSClient`): it shows whether
+   the extension is installed + enabled and self-refreshes.
+2. Enable it: click **Open System Settings…** in that window (or **System Settings ▸
+   General ▸ Login Items & Extensions ▸ File System Extensions**) ▸ turn on
+   *fskit-s3*. The window flips to ✓ once it's on; you can then close it — the
+   extension runs on its own.
 3. Mount the demo volume. We declare `FSSupportsPathURLs`, so the resource
    argument is a **path** (any existing one — the demo ignores it):
    ```sh

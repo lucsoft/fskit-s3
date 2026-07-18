@@ -122,10 +122,17 @@ prefix).
     connection, unmount a volume. All AppKit FFI stays in `appkit.rs`.
 
   `connection`/`keychain`/`s3check`/`mounts` are pure Rust + unit-tested.
-- **`xcode/`** — the non-Rust packaging: the ~8-line Swift `@main`
+- **`xcode/`** — the non-Rust packaging: the Swift `@main`
   `UnaryFileSystemExtension` bootstrap (returns the Rust class via
   `fskit_s3_make_filesystem`), bridging header, entitlements, and a build recipe.
-  ExtensionKit requires this Swift entry; all logic stays in Rust.
+  ExtensionKit requires this Swift entry; all file-system logic stays in Rust.
+  `xcode/host/FskitS3HostApp.swift` is the host app (macOS requires an app to vend
+  the extension) — its window is a **live health check** that queries
+  `FSClient.installedExtensions` for our module's installed/enabled state and
+  self-refreshes, so enabling it in Settings flips it to ✓ (macOS won't let an app
+  toggle a file-system extension itself, so it deep-links to the Settings pane).
+  You can close it once ready — the extension runs in its own `fskitd`-launched
+  process, independent of both apps.
 - **`scripts/build-ext-staticlib.sh`** — Xcode Run Script phase: builds the
   `ext` staticlib for the target arch(es) and drops it in `$BUILT_PRODUCTS_DIR`.
 - **`compose.yaml`** — RustFS (S3-compatible) for local backend testing.

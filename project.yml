@@ -54,6 +54,8 @@ targets:
     dependencies:
       - target: fskit-s3-ext
         embed: true
+      # The host window's health check queries FSClient (installed/enabled state).
+      - sdk: FSKit.framework
 
   # -- FSKit extension: Swift @main bootstrap + the Rust staticlib. --
   fskit-s3-ext:
