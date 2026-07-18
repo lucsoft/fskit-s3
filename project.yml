@@ -23,6 +23,16 @@ settings:
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
 
+# You build/run the HOST app (it registers the embedded extension); an extension
+# can't run on its own. Make a scheme for it so it shows in the selector.
+schemes:
+  fskit-s3-host:
+    build:
+      targets:
+        fskit-s3-host: all
+    run:
+      config: Debug
+
 targets:
   # -- Host app: a shell that carries the extension. --
   fskit-s3-host:
