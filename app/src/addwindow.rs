@@ -486,7 +486,7 @@ impl PasswordController {
 /// Keychain if requested). Used when a mount is requested but no secret is stored.
 pub fn open_password(mtm: MainThreadMarker, connection: Connection) {
     let title = format!("Secret for {}", connection.name);
-    let window = appkit::make_window(mtm, 360.0, 170.0, &title);
+    let window = appkit::make_window(mtm, 360.0, 210.0, &title);
     let Some(content) = appkit::content_view(&window) else {
         return;
     };
@@ -494,19 +494,20 @@ pub fn open_password(mtm: MainThreadMarker, connection: Connection) {
         &content,
         &appkit::label(
             mtm,
-            appkit::rect(20.0, 128.0, 320.0, 20.0),
+            appkit::rect(20.0, 168.0, 320.0, 20.0),
             "Enter the S3 secret access key:",
         ),
     );
-    let secret = appkit::secure_field(mtm, appkit::rect(20.0, 100.0, 320.0, 22.0));
+    let secret = appkit::secure_field(mtm, appkit::rect(20.0, 140.0, 320.0, 22.0));
     appkit::add_subview(&content, &secret);
     let save_keychain = appkit::checkbox(
         mtm,
-        appkit::rect(20.0, 72.0, 320.0, 20.0),
+        appkit::rect(20.0, 112.0, 320.0, 20.0),
         "Save to Keychain",
     );
     appkit::add_subview(&content, &save_keychain);
-    let status = appkit::label(mtm, appkit::rect(20.0, 46.0, 320.0, 20.0), "");
+    // Wrapping, so a long "Mount failed: …" error shows in full instead of clipping.
+    let status = appkit::wrapping_label(mtm, appkit::rect(20.0, 52.0, 320.0, 54.0), "");
     appkit::add_subview(&content, &status);
     let cancel = appkit::push_button(mtm, appkit::rect(130.0, 12.0, 100.0, 32.0), "Cancel");
     appkit::add_subview(&content, &cancel);
