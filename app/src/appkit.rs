@@ -35,6 +35,11 @@ pub fn clear_menu(menu: &NSMenu) {
     menu.removeAllItems();
 }
 
+/// Attach a submenu to a menu item (the item then opens it instead of firing).
+pub fn set_submenu(item: &NSMenuItem, submenu: &NSMenu) {
+    item.setSubmenu(Some(submenu));
+}
+
 /// A separator menu item.
 pub fn separator(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
     NSMenuItem::separatorItem(mtm)

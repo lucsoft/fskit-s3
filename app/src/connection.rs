@@ -310,10 +310,6 @@ impl Registry {
     }
 
     /// Remove the named connection; returns whether one was removed.
-    ///
-    /// Part of the registry's mutation API for the connection-config UI; not wired
-    /// to a menu action in this pass, hence allowed-dead.
-    #[allow(dead_code)]
     pub fn remove(&mut self, name: &str) -> bool {
         let before = self.connections.len();
         self.connections.retain(|c| c.name != name);

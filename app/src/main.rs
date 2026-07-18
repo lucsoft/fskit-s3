@@ -92,6 +92,22 @@ define_class!(
             }
         }
 
+        #[unsafe(method(removeConnection:))]
+        fn remove_connection_action(&self, sender: Option<&NSMenuItem>) {
+            let Some(item) = sender else { return };
+            let Some(name) = appkit::represented_string(item) else {
+                return;
+            };
+            let mut registry = Registry::load();
+            if registry.remove(&name) {
+                if let Err(e) = registry.save() {
+                    eprintln!("[app] remove {name} failed: {e}");
+                    return;
+                }
+                keychain::delete_secret(&name);
+            }
+        }
+
         #[unsafe(method(unmount:))]
         fn unmount_action(&self, sender: Option<&NSMenuItem>) {
             let Some(item) = sender else { return };
@@ -166,14 +182,34 @@ impl Controller {
             false,
         ));
         for c in Registry::load().list() {
-            menu.addItem(&appkit::menu_item(
+            // Each connection is a submenu of Mount / Remove.
+            let submenu = appkit::menu(mtm);
+            submenu.addItem(&appkit::menu_item(
                 mtm,
-                &format!("Mount {}  ({})", c.name, c.kind.label()),
+                "Mount",
                 Some(sel!(mount:)),
                 Some(target),
                 Some(&c.name),
                 true,
             ));
+            submenu.addItem(&appkit::menu_item(
+                mtm,
+                "Remove",
+                Some(sel!(removeConnection:)),
+                Some(target),
+                Some(&c.name),
+                true,
+            ));
+            let item = appkit::menu_item(
+                mtm,
+                &format!("{}  ({})", c.name, c.kind.label()),
+                None,
+                None,
+                None,
+                true,
+            );
+            appkit::set_submenu(&item, &submenu);
+            menu.addItem(&item);
         }
 
         menu.addItem(&appkit::separator(mtm));

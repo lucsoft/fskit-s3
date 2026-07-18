@@ -52,7 +52,6 @@ pub fn read_secret(name: &str) -> Option<String> {
 }
 
 /// Delete a connection's secret from both the shared group and the default keychain.
-#[allow(dead_code)] // used once the connection-config UI grows a remove action
 pub fn delete_secret(name: &str) {
     let _ = delete_generic_password_options(options(name, true));
     let _ = delete_generic_password_options(options(name, false));
