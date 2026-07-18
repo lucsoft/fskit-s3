@@ -255,6 +255,27 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   pointer dangles and crashes the extension.
 - **`enumerate`**: pack `FSItemAttributes` inline in `packEntry`, or entries
   don't show up in `ls`.
+- **Item attributes must be COMPLETE**, or FSKit faults
+  `getStandardItemAttributesForItem: Reported attributes are incomplete` and tears
+  the volume down (Finder's fuller attribute request hits this even when plain
+  `ls`/`cat` didn't). The standard set FSKit demands is `type, mode, linkCount,
+  uid, gid, flags, size, allocSize, fileID, parentID` **plus the access/modify/
+  change/birth `timespec` timestamps** — a read-only volume must still report them
+  all (see `fill_attributes`, used by both `getAttributes` and `enumerate`). The
+  fault log prints `attributes mask is <got>, expected <want>`; XOR them against
+  the `FSItemAttribute` bit values in `FSItem.h` to see which are missing. Passing
+  a `timespec` by value needs an `Encode` impl matching `{timespec=qq}` (both
+  fields `long`→`q` on 64-bit); a wrong encoding panics the objc2 msg_send in a
+  debug build.
+- **The volume must implement `maximumFileSizeInBits` (or `maximumFileSize`)**:
+  it's `@optional` in `FSVolumePathConfOperations` but required at runtime —
+  otherwise `getMaxFileSizeInBits: … One of them must be implemented`.
+- **fskitd persists a mount-point registry**: an uncleanly-ended mount (crash,
+  force-unmount, logout while mounted) can orphan an entry, and the next mount of
+  the same path fails the *final* step with `Failed to store the mount point in
+  settings file! NSCocoaErrorDomain Code=516` ("file exists"). It's not the mount
+  folder. Clear it with `sudo killall fskitd` (a clean `diskutil unmount` removes
+  the entry; a different mount path also sidesteps it).
 - **`-o` options need an option syntax**: to accept `mount -o key=value,…`, the
   Info.plist's `FSActivateOptionSyntax` must declare a getopt string with `o:`
   (Apple's msdos uses `u:g:m:o:`). Empty ⇒ `mount` fails with "Argument count N not

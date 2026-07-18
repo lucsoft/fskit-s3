@@ -56,6 +56,12 @@ define_class!(
         fn truncatesLongNames(&self) -> bool {
             false
         }
+        #[unsafe(method(maximumFileSizeInBits))]
+        fn maximumFileSizeInBits(&self) -> isize {
+            // 2^63 bytes — comfortably above any object-store object size. FSKit
+            // requires one of maximumFileSize / maximumFileSizeInBits at runtime.
+            64
+        }
     }
 
     unsafe impl FSVolumeOperations for S3Volume {
@@ -247,17 +253,10 @@ define_class!(
                 };
                 let id = item_id_for(&join(dir.path(), &entry.name));
                 let next_cookie = (i + 1) as FSDirectoryCookie;
-                // Pack the attributes inline — FSKit drops entries that lack them.
+                // Pack the attributes inline — FSKit drops entries that lack them,
+                // and faults if the set is incomplete (same rule as getAttributes).
                 let attrs = FSItemAttributes::new();
-                attrs.setType(item_type);
-                attrs.setMode(if entry.is_dir() { 0o40755 } else { 0o100644 });
-                attrs.setLinkCount(1);
-                attrs.setUid(0);
-                attrs.setGid(0);
-                attrs.setSize(entry.size);
-                attrs.setAllocSize(entry.size);
-                attrs.setFileID(id);
-                attrs.setParentID(parent_id);
+                fill_attributes(&attrs, entry.is_dir(), entry.size, id, parent_id);
                 let packed = packer.packEntry(&fname, item_type, id, next_cookie, Some(&attrs));
                 if !packed {
                     break; // buffer full; FSKit will call again with this cookie
@@ -443,7 +442,31 @@ impl S3Volume {
 /// Build an `FSItemAttributes` snapshot for an item.
 fn attributes_for(item: &S3Item) -> Retained<FSItemAttributes> {
     let attrs = FSItemAttributes::new();
-    if item.is_dir() {
+    fill_attributes(
+        &attrs,
+        item.is_dir(),
+        item.size(),
+        item.item_id(),
+        item_id_for(corepath::parent(item.path())),
+    );
+    attrs
+}
+
+/// Populate the full set of attributes FSKit's standard-attributes path requires.
+///
+/// FSKit faults ("Reported attributes are incomplete") unless the snapshot carries
+/// `type`, `mode`, `linkCount`, `uid`, `gid`, `flags`, `size`, `allocSize`,
+/// `fileID`, `parentID`, and the access/modify/change/birth timestamps — even a
+/// read-only volume must report them all. Timestamps default to "now"; the backend
+/// entries don't carry reliable per-object times.
+fn fill_attributes(
+    attrs: &FSItemAttributes,
+    is_dir: bool,
+    size: u64,
+    item_id: FSItemID,
+    parent_id: FSItemID,
+) {
+    if is_dir {
         attrs.setType(FS_ITEM_TYPE_DIRECTORY);
         attrs.setMode(0o40755);
     } else {
@@ -453,11 +476,28 @@ fn attributes_for(item: &S3Item) -> Retained<FSItemAttributes> {
     attrs.setLinkCount(1);
     attrs.setUid(0);
     attrs.setGid(0);
-    attrs.setSize(item.size());
-    attrs.setAllocSize(item.size());
-    attrs.setFileID(item.item_id());
-    attrs.setParentID(item_id_for(corepath::parent(item.path())));
-    attrs
+    attrs.setFlags(0);
+    attrs.setSize(size);
+    attrs.setAllocSize(size);
+    attrs.setFileID(item_id);
+    attrs.setParentID(parent_id);
+    let now = now_timespec();
+    attrs.setAccessTime(now);
+    attrs.setModifyTime(now);
+    attrs.setChangeTime(now);
+    attrs.setBirthTime(now);
+}
+
+/// The current wall-clock time as a `Timespec`, or the Unix epoch if the clock is
+/// unavailable (keeps this panic-free).
+fn now_timespec() -> Timespec {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Timespec {
+        tv_sec: d.as_secs() as i64,
+        tv_nsec: d.subsec_nanos() as i64,
+    }
 }
 
 /// Read an `FSFileName` as a UTF-8 string.

@@ -12,11 +12,28 @@
 use core::ffi::c_void;
 
 use block2::DynBlock;
+use objc2::encode::{Encode, Encoding};
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{extern_class, extern_methods, extern_protocol, rc::Allocated, rc::Retained};
 use objc2_foundation::{NSArray, NSData, NSError, NSString, NSUUID};
 
 // ---- scalar typedefs (mirror FSKit's NS_ENUM/NS_OPTIONS) ---------------------
+
+/// `struct timespec` as passed by value to FSKit's time-attribute setters
+/// (`setModifyTime:` et al.). On 64-bit Apple platforms both fields are `long`,
+/// which the Objective-C runtime encodes as `q` — so the encoding is `{timespec=qq}`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+// SAFETY: `#[repr(C)]` with two `i64` fields; the encoding matches the C
+// `struct timespec` the setter methods expect on LP64 (`long` -> `q`).
+unsafe impl Encode for Timespec {
+    const ENCODING: Encoding = Encoding::Struct("timespec", &[i64::ENCODING, i64::ENCODING]);
+}
 
 /// `FSItemType` (NS_ENUM(NSInteger)).
 pub type FSItemType = isize;
@@ -166,6 +183,16 @@ impl FSItemAttributes {
         pub fn setFileID(&self, value: FSItemID);
         #[unsafe(method(setParentID:))]
         pub fn setParentID(&self, value: FSItemID);
+        #[unsafe(method(setFlags:))]
+        pub fn setFlags(&self, value: u32);
+        #[unsafe(method(setAccessTime:))]
+        pub fn setAccessTime(&self, value: Timespec);
+        #[unsafe(method(setModifyTime:))]
+        pub fn setModifyTime(&self, value: Timespec);
+        #[unsafe(method(setChangeTime:))]
+        pub fn setChangeTime(&self, value: Timespec);
+        #[unsafe(method(setBirthTime:))]
+        pub fn setBirthTime(&self, value: Timespec);
     );
 }
 
@@ -358,6 +385,10 @@ extern_protocol!(
         unsafe fn restrictsOwnershipChanges(&self) -> bool;
         #[unsafe(method(truncatesLongNames))]
         unsafe fn truncatesLongNames(&self) -> bool;
+        // `@optional` in the header, but FSKit requires one of maximumFileSize /
+        // maximumFileSizeInBits at runtime (else "One of them must be implemented").
+        #[unsafe(method(maximumFileSizeInBits))]
+        unsafe fn maximumFileSizeInBits(&self) -> isize;
     }
 );
 
