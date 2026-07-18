@@ -107,7 +107,12 @@ impl Controller {
             status_item,
             registry: Registry::with_defaults(),
         });
-        // SAFETY: standard NSObject designated initializer on a fresh allocation.
+        // SAFETY: `this` is a `PartialInit<Self>` — a fresh `alloc()` whose ivars
+        // were just populated by `set_ivars` — so it has been allocated but not
+        // yet initialized, exactly the state `-init` requires. `super(this)`
+        // dispatches to the superclass `NSObject`'s designated initializer, which
+        // takes no arguments and has no further preconditions; it consumes the
+        // partial init and yields the initialized, owned `Retained<Self>`.
         unsafe { msg_send![super(this), init] }
     }
 

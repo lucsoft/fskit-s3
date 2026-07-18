@@ -1,8 +1,11 @@
-//! Checked wrappers over the AppKit calls the menu bar needs.
+//! Checked wrappers over the AppKit calls the app needs.
 //!
-//! This is the **only** module permitted to write `unsafe`. Everything it
-//! exports is safe to call: each wrapper validates its inputs and only performs
-//! FFI whose preconditions are met here, so `main.rs` never touches `unsafe`.
+//! Everything this module exports is safe to call: each wrapper validates its
+//! inputs and only performs FFI whose preconditions are met here, so the menu
+//! code calls safe Rust. The only `unsafe` outside this module is in
+//! `Controller` (main.rs): the `define_class!` DSL that *declares* the ObjC class,
+//! and the superclass `-init` in `Controller::new` — both documented in place
+//! with `SAFETY:` comments.
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
