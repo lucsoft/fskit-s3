@@ -45,8 +45,8 @@ its config as `-o` options, so the app and a plain command do the same thing:
 
 ```sh
 cargo run -p fskit-s3-app                # the app
-# …or by hand (the extension needs an explicit `kind`):
-mount -F -t fskit-s3 -o kind=memory ~/fskit-s3/.sources/memory ~/fskit-s3/memory
+# …or by hand (the extension needs an explicit `type`):
+mount -F -t fskit-s3 -o type=memory ~/fskit-s3/.sources/memory ~/fskit-s3/memory
 umount ~/fskit-s3/memory
 ```
 

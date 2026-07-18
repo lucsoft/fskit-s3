@@ -8,9 +8,9 @@
 //! returns the (cached, singleton) delegate instance.
 //!
 //! `loadResource` picks the backend from the mount's `-o` options (see
-//! [`backend_for`]), dispatching on an explicit `kind`: `kind=s3` ⇒ an S3 bucket
+//! [`backend_for`]), dispatching on an explicit `type`: `type=s3` ⇒ an S3 bucket
 //! (secret from the shared Keychain access group, else an `-o secret`),
-//! `kind=memory` ⇒ the in-memory demo. A missing `kind` fails the mount — the
+//! `type=memory` ⇒ the in-memory demo. A missing `type` fails the mount — the
 //! extension refuses to guess rather than silently serving the demo.
 
 #![allow(non_snake_case)]
@@ -169,10 +169,10 @@ const KEYCHAIN_SERVICE: &str = "dev.lucsoft.fskit-s3";
 const KEYCHAIN_ACCESS_GROUP: &str = "H8563U643B.dev.lucsoft.fskit-s3";
 
 /// Choose the backend for a mount from its `-o` options, dispatching on the
-/// explicit `kind` the app always sends.
+/// explicit `type` the app always sends.
 ///
-/// `kind=memory` ⇒ the demo; `kind=s3` ⇒ an S3 bucket (secret from `Keychain[name]`
-/// else the `-o secret`). A **missing `kind`** is an error — we refuse to guess and
+/// `type=memory` ⇒ the demo; `type=s3` ⇒ an S3 bucket (secret from `Keychain[name]`
+/// else the `-o secret`). A **missing `type`** is an error — we refuse to guess and
 /// never silently fall back to the demo, so a config/`-o`-delivery problem fails
 /// the mount loudly instead of masquerading as the demo.
 fn backend_for(options: &FSTaskOptions) -> Result<Arc<dyn StorageBackend>, String> {
@@ -183,12 +183,12 @@ fn backend_for(options: &FSTaskOptions) -> Result<Arc<dyn StorageBackend>, Strin
     ));
     let opts = parse_options(&raw);
 
-    match opts.get("kind").map(String::as_str) {
+    match opts.get("type").map(String::as_str) {
         Some("memory") => Ok(demo_backend()),
         Some("s3") => build_s3_backend(&opts),
-        Some(other) => Err(format!("unknown connection kind {other:?}")),
+        Some(other) => Err(format!("unknown connection type {other:?}")),
         None => Err(format!(
-            "no connection kind in mount options — refusing to guess (taskOptions: {raw:?})"
+            "no connection type in mount options — refusing to guess (taskOptions: {raw:?})"
         )),
     }
 }

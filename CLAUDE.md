@@ -101,9 +101,10 @@ prefix).
   against a `StorageBackend` on a tokio runtime; mutating ops reply `EROFS`.
   `lib.rs`: `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
   `fskit_s3_make_filesystem` entry point. `loadResource` picks the backend from
-  the mount's `-o` options (`backend_for`): an S3 bucket for a named connection —
-  secret from the shared Keychain group, else an `-o secret` — or the in-memory
-  demo for `memory`/unnamed mounts.
+  the mount's `-o` options (`backend_for`), dispatching on an explicit `type`:
+  `type=s3` (secret from the shared Keychain group, else an `-o secret`) or
+  `type=memory` (the demo). A missing `type` **fails the mount** — it never
+  silently serves the demo.
 - **`app/src/`** — `fskit-s3-app`, the macOS app (a status-bar app):
   - `connection.rs` — the `Connection`/`ConnectionKind` (`Memory` | `S3(S3Meta)`)
     model + the persisted `Registry` (`~/Library/Application Support/fskit-s3/
@@ -164,8 +165,8 @@ with its config as `-o` options, so the app and a plain `mount` do the same thin
 
 ```bash
 cargo run -p fskit-s3-app                # the app
-# …or by hand (what the app runs — the extension needs an explicit `kind`):
-mount -F -t fskit-s3 -o kind=memory ~/fskit-s3/.sources/memory ~/fskit-s3/memory
+# …or by hand (what the app runs — the extension needs an explicit `type`):
+mount -F -t fskit-s3 -o type=memory ~/fskit-s3/.sources/memory ~/fskit-s3/memory
 umount ~/fskit-s3/memory
 ```
 

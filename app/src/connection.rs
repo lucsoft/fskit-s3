@@ -90,24 +90,21 @@ impl Connection {
     }
 
     /// The `-o key=value` options handed to `mount` for this connection — its
-    /// non-secret config. Always carries an explicit `kind` (`memory` | `s3`) so
+    /// non-secret config. Always carries an explicit `type` (`memory` | `s3`) so
     /// the extension dispatches unambiguously and **errors** on a mount with no
-    /// `kind` rather than silently serving the demo. `name` identifies the
-    /// connection (the extension's Keychain account for S3). The **secret** is
-    /// never included; [`crate::mounts::mount`] appends `secret=…` for the insecure
-    /// path.
+    /// `type` rather than silently serving the demo. For S3, `name` identifies the
+    /// connection (the extension's Keychain account); the demo needs no `name`. The
+    /// **secret** is never included; [`crate::mounts::mount`] appends `secret=…` for
+    /// the insecure path.
     ///
     /// Values must not contain commas (the `-o` list delimiter) — true for
     /// endpoints/buckets/regions/keys; secrets go through the Keychain instead.
     pub fn mount_options(&self) -> Vec<(String, String)> {
         match &self.kind {
-            ConnectionKind::Memory => vec![
-                ("kind".to_string(), "memory".to_string()),
-                ("name".to_string(), self.name.clone()),
-            ],
+            ConnectionKind::Memory => vec![("type".to_string(), "memory".to_string())],
             ConnectionKind::S3(s3) => {
                 let mut opts = vec![
-                    ("kind".to_string(), "s3".to_string()),
+                    ("type".to_string(), "s3".to_string()),
                     ("name".to_string(), self.name.clone()),
                     ("bucket".to_string(), s3.bucket.clone()),
                     ("access_key_id".to_string(), s3.access_key_id.clone()),
@@ -477,11 +474,15 @@ mod tests {
     }
 
     #[test]
-    fn memory_mount_options_carry_an_explicit_kind() {
+    fn memory_mount_options_are_just_the_type() {
         let opts = Connection::memory().mount_options();
-        assert!(opts.contains(&("kind".to_string(), "memory".to_string())));
-        // No S3 config leaks into a memory mount.
-        assert!(!opts.iter().any(|(k, _)| k == "bucket" || k == "secret"));
+        assert_eq!(opts, vec![("type".to_string(), "memory".to_string())]);
+    }
+
+    #[test]
+    fn s3_mount_options_start_with_the_type() {
+        let opts = s3_conn("photos").mount_options();
+        assert_eq!(opts.first(), Some(&("type".to_string(), "s3".to_string())));
     }
 
     #[test]
