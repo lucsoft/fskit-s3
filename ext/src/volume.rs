@@ -35,6 +35,15 @@ pub struct VolumeIvars {
     backend: OnceLock<Arc<dyn StorageBackend>>,
     pending: Mutex<Option<HashMap<String, String>>>,
     rt: Runtime,
+    /// Per-directory "last changed through this mount" time, bumped whenever a
+    /// create/remove/rename alters a directory's contents. Object stores keep no
+    /// directory mtime, so without this a directory's reported time never moves and
+    /// macOS keeps serving a **stale cached listing** — a just-deleted file lingers
+    /// in `ls`, a just-created one is missing. Surfacing a time that advances on
+    /// change (and, from it, a fresh enumeration verifier) is the signal that makes
+    /// the kernel re-enumerate. A missing entry means "never changed here" → the
+    /// process-stable fallback, so unchanged directories still report a constant.
+    dir_mtimes: Mutex<HashMap<String, std::time::SystemTime>>,
 }
 
 define_class!(
@@ -277,10 +286,18 @@ define_class!(
                 reply.call((verifier, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
                 return;
             };
+            // Verifier derived from the directory's change time: stable while the
+            // directory is unchanged, different once a create/remove/rename bumped
+            // it. Returning the *input* verifier unchanged (as before) told FSKit the
+            // directory never changed, so it kept serving a cached listing.
+            let out_verifier = self.dir_verifier(dir.path());
             let entries = match self.ivars().rt.block_on(backend.list(dir.path())) {
                 Ok(entries) => entries,
                 Err(e) => {
-                    reply.call((verifier, Retained::as_ptr(&err(errno(&e))) as *mut NSError));
+                    reply.call((
+                        out_verifier,
+                        Retained::as_ptr(&err(errno(&e))) as *mut NSError,
+                    ));
                     return;
                 }
             };
@@ -317,7 +334,12 @@ define_class!(
                     break; // buffer full; FSKit will call again with this cookie
                 }
             }
-            reply.call((verifier, ptr::null_mut()));
+            crate::log_line(&format!(
+                "enumerate {} cookie={cookie} -> {} entries, verifier {out_verifier}",
+                dir.path(),
+                entries.len(),
+            ));
+            reply.call((out_verifier, ptr::null_mut()));
         }
 
         // ---- mutating operations ----
@@ -420,6 +442,8 @@ define_class!(
             match self.ivars().rt.block_on(backend.create(&child, kind)) {
                 Ok(()) => {
                     crate::log_line(&format!("createItem {child} ({kind:?}): ok"));
+                    // The parent directory's listing changed; bump it so `ls` refreshes.
+                    self.touch_dir(dir.path());
                     // FSKit keeps the item (until reclaimItem) → transfer ownership.
                     let item = S3Item::new(child, kind == EntryKind::Dir, 0);
                     let fname = FSFileName::nameWithString(&NSString::from_str(&name_str));
@@ -516,6 +540,7 @@ define_class!(
             match self.ivars().rt.block_on(backend.remove(&child, kind)) {
                 Ok(()) => {
                     crate::log_line(&format!("removeItem {child} ({kind:?}): ok"));
+                    self.touch_dir(dir.path()); // parent's listing changed
                     reply.call((ptr::null_mut(),));
                 }
                 Err(e) => {
@@ -554,6 +579,9 @@ define_class!(
             match self.ivars().rt.block_on(backend.rename(&src, &dst)) {
                 Ok(()) => {
                     crate::log_line(&format!("renameItem {src} -> {dst}: ok"));
+                    // Both the source and destination directories' listings changed.
+                    self.touch_dir(corepath::parent(&src));
+                    self.touch_dir(dest_dir.path());
                     let fname = FSFileName::nameWithString(&NSString::from_str(&dest_name));
                     reply.call((Retained::as_ptr(&fname) as *mut FSFileName, ptr::null_mut()));
                 }
@@ -646,6 +674,7 @@ impl S3Volume {
             backend: OnceLock::new(),
             pending: Mutex::new(None),
             rt,
+            dir_mtimes: Mutex::new(HashMap::new()),
         });
         unsafe { msg_send![super(this), initWithVolumeID: volume_id, volumeName: name] }
     }
@@ -669,6 +698,37 @@ impl S3Volume {
         self.ivars().backend.get()
     }
 
+    /// Record that `dir_path`'s contents just changed (a create/remove/rename under
+    /// it). Its reported mtime and enumeration verifier then move, so macOS drops
+    /// its cached listing and re-enumerates instead of showing stale entries.
+    fn touch_dir(&self, dir_path: &str) {
+        if let Ok(mut m) = self.ivars().dir_mtimes.lock() {
+            m.insert(dir_path.to_string(), std::time::SystemTime::now());
+        }
+    }
+
+    /// The mtime to report for a directory: the last time it changed through this
+    /// mount, else the process-stable fallback (so an unchanged directory reports a
+    /// constant, never a per-call "now").
+    fn dir_mtime(&self, dir_path: &str) -> std::time::SystemTime {
+        self.ivars()
+            .dir_mtimes
+            .lock()
+            .ok()
+            .and_then(|m| m.get(dir_path).copied())
+            .unwrap_or_else(stable_fallback_time)
+    }
+
+    /// A directory's enumeration verifier, derived from its change time: it moves
+    /// exactly when the directory does, so FSKit's own change detection invalidates
+    /// alongside the kernel's attribute cache. Unchanged ⇒ constant.
+    fn dir_verifier(&self, dir_path: &str) -> FSDirectoryVerifier {
+        self.dir_mtime(dir_path)
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0) as FSDirectoryVerifier
+    }
+
     /// Build an `FSItemAttributes` snapshot for an item, reporting the file's
     /// *current* size and modify time — the authoritative source is `stat` (per
     /// the object-store model), so a file just written or truncated shows its real
@@ -683,7 +743,13 @@ impl S3Volume {
                 .and_then(|b| self.ivars().rt.block_on(b.stat(item.path())).ok())
         };
         let size = stat.as_ref().map(|e| e.size).unwrap_or_else(|| item.size());
-        let modified = stat.as_ref().and_then(|e| e.modified);
+        // A directory reports its change-tracked mtime (object stores keep none);
+        // a file reports the object's authoritative `last_modified`.
+        let modified = if item.is_dir() {
+            Some(self.dir_mtime(item.path()))
+        } else {
+            stat.as_ref().and_then(|e| e.modified)
+        };
         let attrs = FSItemAttributes::new();
         fill_attributes(
             &attrs,

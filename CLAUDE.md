@@ -346,8 +346,23 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   has been changed since reading it!!!"* (and `make`/`rsync` see phantom changes).
   So `fill_attributes` uses the object's real `last_modified` (S3 provides it;
   `backend::meta_modified` maps it onto `Entry.modified`) and, when the backend has
-  no time (directories/prefixes, the in-memory demo), a single process-stable
-  instant — never `now()`.
+  no time (the in-memory demo, prefixes), a single process-stable instant — never
+  `now()`. **Directories are the deliberate exception — see the next bullet.**
+- **A directory's `mtime` MUST *advance* when its contents change, or `ls` shows a
+  stale listing.** The mirror image of the rule above, and they coexist: object
+  stores keep no directory mtime, so if a directory always reports the same instant,
+  macOS never sees it change and keeps serving a **cached listing** — a just-deleted
+  file lingers, a just-created one is missing (delete "succeeds" but the file is
+  "back" on the next `ls`). Backend delete/list are consistent (proven by the live
+  tests); the staleness is entirely macOS-side cache coherence. The volume keeps a
+  per-directory change time (`VolumeIvars.dir_mtimes`, bumped by `touch_dir` on every
+  create/remove/rename) and reports it as the directory's mtime **and** derives the
+  `enumerate` verifier from it (`dir_verifier`) — the input verifier was previously
+  echoed unchanged, telling FSKit the directory never changed. Both signals move only
+  on an actual change, so unchanged directories still report a constant (no spurious
+  re-enumeration, no editor warning). The map only sees changes made *through this
+  mount* — an acceptable limit any cache shares. This mirrors what Apple's passthrough
+  sample gets for free from `fstat` (a real dir mtime that `unlink` advances).
 - **The volume must implement `maximumFileSizeInBits` (or `maximumFileSize`)**:
   it's `@optional` in `FSVolumePathConfOperations` but required at runtime —
   otherwise `getMaxFileSizeInBits: … One of them must be implemented`.
