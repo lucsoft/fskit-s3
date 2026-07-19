@@ -49,16 +49,6 @@ pub struct S3Meta {
     pub session_token: Option<String>,
 }
 
-impl ConnectionKind {
-    /// A short human label for a menu subtitle.
-    pub fn label(&self) -> &'static str {
-        match self {
-            ConnectionKind::Memory => "in-memory demo",
-            ConnectionKind::S3(_) => "S3",
-        }
-    }
-}
-
 impl Connection {
     /// The built-in, credential-free in-memory connection.
     pub fn memory() -> Self {
@@ -491,7 +481,6 @@ mod tests {
         let c = Connection::memory();
         assert_eq!(c.name, "memory");
         assert_eq!(c.kind, ConnectionKind::Memory);
-        assert_eq!(c.kind.label(), "in-memory demo");
         assert!(!c.is_s3());
     }
 

@@ -4,35 +4,24 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
-# The fskit-s3 macOS app: a status-bar app that manages connections and mounts.
-# It owns both the connection/mount logic (the pure, unit-tested `connection` +
-# `mounts` modules) and the AppKit UI on top (driven via objc2, with every FFI
-# call confined to `appkit.rs`). There is no bespoke CLI — a connection is
-# realised by the system `mount` tool with its config as `-o` options.
-[[bin]]
-name = "fskit-s3-app"
-path = "src/main.rs"
-
-# The app logic is a library so it can be linked two ways: `rlib` for the
-# standalone `cargo run` binary above, and `staticlib` for the Xcode host target
-# (`fskit-s3-host`), which links it and calls the C-ABI `fskit_s3_app_run` entry —
-# exactly how the `ext` staticlib is linked into the extension target. That lets a
-# single Rust app both run standalone in dev and be the app that carries the FSKit
-# extension, so there's no separate Swift host app to keep in sync.
+# The logic + Rust↔Swift contract behind the fskit-s3 macOS app. It owns the
+# connection/mount logic (the pure, unit-tested `connection` + `mounts` modules),
+# the Keychain/health/autostart bits, and exposes them to the SwiftUI UI through a
+# UniFFI contract (`ffi.rs`). No CLI, no AppKit UI — a connection is realised by the
+# system `mount` tool, and the UI lives in `xcode/host/*.swift`.
 [lib]
 name = "fskit_s3_app"
 path = "src/lib.rs"
-# `staticlib` is what the Xcode host target links; `rlib` keeps the `cargo run`
-# binary building; `cdylib` exists only so `uniffi-bindgen` can read the contract's
-# metadata back out of a built dynamic library (library-mode generation). The
-# bundle never ships the dylib.
-crate-type = ["staticlib", "rlib", "cdylib"]
+# `staticlib` is what the Xcode host target links; `cdylib` exists only so
+# `uniffi-bindgen` can read the contract's metadata back out of a built dynamic
+# library (library-mode generation). The bundle never ships the dylib.
+crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 # Connection persistence: the app-local connections.json (never holds secrets).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Endpoint URL validation in the Add-mount form.
+# Endpoint URL validation in the connection form.
 url = "2"
 
 # Keychain: stores the S3 secret (optionally in a shared access group the ext reads).
@@ -49,69 +38,18 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 # Swift bindings the SwiftUI app calls. Proc-macro-only mode — no UDL, no build.rs.
 uniffi = { workspace = true }
 
-# The objc2 crates gate every class behind a like-named feature, and their
-# `default` turns the *whole* framework on. We disable defaults and re-enable only
-# what this app touches — a much smaller compile surface, and a precise record of
-# what the app actually depends on.
-
-# objc2 core: `define_class!`, `msg_send!`, `Retained`, `MainThreadMarker`. The
-# only default feature is `std`, which we keep.
+# objc2 core: `class!`, `msg_send!`, `Retained` — used by `health` (FSClient) and
+# `autostart` (SMAppService). Both classes are looked up at runtime via `class!`, so
+# no objc2 *framework* crate is needed; the frameworks are linked by the Xcode target.
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
 
 # `RcBlock` — the FSKit `FSClient` health query takes an ObjC completion block
 # (`void(^)(NSArray*, NSError*)`). `std` is block2's default.
 block2 = { version = "0.6", default-features = false, features = ["std"] }
 
-# Foundation: NSString bridging + NSGeometry (NSRect/NSPoint/NSSize for control frames).
+# Foundation: just `NSString` bridging, for reading strings out of the FSClient
+# reply and the bundle Info.plist in `health`.
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
-    "NSGeometry",
-    # NSURL: build the System-Settings deep-link URL opened from the health window.
-    "NSURL",
-    # NSAttributedString/NSMutableAttributedString: inline SF Symbol + text in the
-    # health-window status labels (a symbol text attachment + the message).
-    "NSAttributedString",
-] }
-
-# AppKit: just the status-bar menu classes. objc2 gates each type/method behind
-# `cfg(all(feature = "Self", feature = "Super", …))`, so besides the classes we
-# name we must also enable their whole superclass chain and the CGFloat support.
-objc2-app-kit = { version = "0.3", default-features = false, features = [
-    "std",
-    # CGFloat-typed APIs: statusItemWithLength + NSVariableStatusItemLength.
-    "objc2-core-foundation",
-    # Classes we use directly:
-    "NSApplication",        # the app object (setActivationPolicy)
-    "NSRunningApplication", # defines NSApplicationActivationPolicy (Accessory)
-    "NSMenu",               # the dropdown
-    "NSMenuItem",           # its rows (+ separators)
-    "NSStatusBar",          # systemStatusBar() + NSVariableStatusItemLength
-    "NSStatusItem",         # the menu-bar item (statusItemWithLength / setMenu)
-    "NSStatusBarButton",    # the status button; setTitle draws the ☁ glyph
-    # The Add-mount window + its form controls:
-    "NSWindow",             # the form window
-    "NSGraphics",           # NSBackingStoreType (window initializer)
-    "NSTextField",          # labels + editable fields
-    "NSSecureTextField",    # the secret field (bullets)
-    "NSPopUpButton",        # the In-memory/S3 type selector
-    "NSBox",                # the rounded, filled "grouped" sections + row separators
-    "NSSwitch",             # the modern toggle rows (Save to Keychain / Mount at launch)
-    "NSText",               # NSTextAlignment (right-aligning the grouped-row value fields)
-    "NSCell",               # NSControlStateValue{On,Off} for checkbox/switch state
-    "NSColor",              # systemRed bezel + the grouped-section fill color
-    "NSAlert",              # the "delete this connection?" confirmation
-    "NSWorkspace",          # open the System-Settings extensions pane (health window)
-    "NSParagraphStyle",     # NSLineBreakMode + setLineBreakMode (wrapping status label)
-    # SF Symbols for the menu-bar glyph, menu rows, and health-window status lines:
-    "NSImage",              # the symbol image + NSImageSymbolConfiguration (same module)
-    "NSTextAttachment",     # inline symbol in an attributed label
-    "NSAttributedString",   # attributedStringWithAttachment: + setAttributedStringValue
-    "NSFont",               # NSTextAttachment/attributed-string glyph metrics
-    # Superclass chain the above are gated on (NSStatusBarButton → NSButton →
-    # NSControl → NSView → NSResponder; NSApplication/NSWindow → NSResponder):
-    "NSButton",
-    "NSControl",
-    "NSView",
-    "NSResponder",
 ] }

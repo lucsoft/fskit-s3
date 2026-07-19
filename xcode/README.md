@@ -46,10 +46,10 @@ Signing & Capabilities and let automatic signing regenerate the profiles.
 ## Build, install, mount
 
 1. Scheme **fskit-s3-host** ▸ **Build & Run** (this signs + registers the extension).
-   The app is a ☁ **status-bar** app; its top menu row is a **live health check**
-   (via `FSClient`, in Rust) showing whether the extension is installed + enabled,
-   and it registers itself to launch at login. When the extension isn't ready it
-   pops a health window automatically.
+   The app is a ☁ **SwiftUI menu-bar** app; its health row is a **live health check**
+   (via `FSClient` in the Rust core, reached through the UniFFI contract) showing
+   whether the extension is installed + enabled, and it registers itself to launch at
+   login. Click the health row to open the health window.
 2. Enable it: click **Open System Settings…** in the health window (its top menu
    row opens it too), or **System Settings ▸ General ▸ Login Items & Extensions ▸
    File System Extensions** ▸ turn on *fskit-s3*. **Re-check** flips it to ✓ once

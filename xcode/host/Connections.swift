@@ -46,7 +46,7 @@ private struct ConnectionMenu: View {
             // item glyphs monochrome, so the shape — not colour — carries the state.)
             Label(
                 "\(connection.name)  (\(kindLabel(connection.kind)))",
-                systemImage: mounted ? "circle.fill" : "circle"
+                systemImage: mounted ? "circle.fill" : "circle",
             )
         }
     }

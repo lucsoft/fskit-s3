@@ -25,21 +25,16 @@ pops a window that deep-links you straight to that pane. It also registers itsel
 to launch at login. Signing and the FSKit entitlement (needs a paid Apple team)
 are covered in [`CLAUDE.md`](CLAUDE.md).
 
-**Then mount something.** The app is a ☁ menu-bar item (its top row is the
-extension's health). **Add mount…** creates a connection — an in-memory demo, or
-an S3 bucket (endpoint / bucket / region / keys, secret saved to your Keychain) —
-and the menu mounts and unmounts it.
+**Then mount something.** The app is a ☁ menu-bar item (a native SwiftUI
+`MenuBarExtra`; its health row shows the extension's state). **New Connection…**
+creates a connection — an in-memory demo, or an S3 bucket (endpoint / bucket /
+region / keys, secret saved to your Keychain) — and the menu mounts and unmounts it.
 
-For UI development you can run the app standalone with `cargo run -p fskit-s3-app`
-— **but note this does *not* register the extension.** `cargo run` builds a bare,
-unsigned binary with no embedded `.appex`, so macOS has nothing to register as a
-File System Extension; the extension only comes from the signed `.app` bundle,
-installed to `/Applications`. So: install the extension **once** (or whenever
-`ext/` changes) with the bundle, then iterate the UI with `cargo run`.
+The UI is SwiftUI over a UniFFI contract to the Rust core, so iterate it in Xcode
+(SwiftUI previews), or rebuild + install the whole bundle:
 
 ```sh
 scripts/dev-app.sh        # build the bundle -> install to /Applications -> launch
-cargo run -p fskit-s3-app # UI-only iteration, against the installed extension
 ```
 
 There's no bespoke CLI: a connection is just the system `mount` tool. The config
@@ -141,10 +136,10 @@ and never touches any existing mount.
 - [x] `core` — async `StorageBackend` trait + path/key helpers + in-memory demo
 - [x] `backend` — `StorageBackend` over OpenDAL (S3), tested against its in-memory service
 - [x] `ext` — mounts and serves files on macOS 26 (in-memory demo + real S3 bucket)
-- [x] `app` — connection model, Keychain secrets, and mounting (config as `mount -o` options)
+- [x] `app` — SwiftUI menu-bar app over a UniFFI contract to the Rust core (connections, Keychain secrets, mounting)
 - [x] Read-only browsing: list + read
+- [x] "Test & Save" credential check runs off the main actor (no UI stall)
 - [ ] Verify the S3 path end-to-end on a signed build (framework linking + reading the shared Keychain group from the `fskitd` sandbox)
-- [ ] Move "Test & Save" off the main thread (the credential check blocks the UI while listing the bucket)
 - [ ] More backends — WebDAV, SFTP (OpenDAL feature flag + constructor; trait and FSKit glue don't change)
 - [ ] Write support (the volume is read-only today; mutating ops reply `EROFS`)
 - [ ] The Photos question — needs a block-device FSKit filesystem, not the unary one here; a separate track (see [`CLAUDE.md`](CLAUDE.md))

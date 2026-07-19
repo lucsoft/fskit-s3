@@ -64,11 +64,15 @@ object store, so those ops reply `ENOTSUP`.
 
 ## Key decisions (and why)
 
-- **Rust, not Swift.** FSKit is a plain Objective-C framework — its headers
-  (`FSUnaryFileSystem.h`, `FSVolume.h`, …) are ObjC, with ObjC `@protocol`s and
-  block-based reply handlers, and there is no `.swiftinterface`. So it's driven
-  from Rust with `objc2`/`define_class!` exactly like the sibling `wayland-macos`
-  project drives AppKit. No Swift shim.
+- **Extension in Rust, app UI in SwiftUI.** FSKit is a plain Objective-C framework
+  — its headers (`FSUnaryFileSystem.h`, `FSVolume.h`, …) are ObjC, with ObjC
+  `@protocol`s and block-based reply handlers, and no `.swiftinterface`. So the
+  **extension** is driven from Rust with `objc2`/`define_class!` (like the sibling
+  `wayland-macos` project drives AppKit). The **app UI** is the opposite call: it's
+  native **SwiftUI** over a **UniFFI** contract (`app/src/ffi.rs` → generated Swift),
+  because SwiftUI (menu bar, forms, Liquid Glass) is far nicer than driving AppKit
+  from objc2, while the valuable logic stays in testable Rust below the contract. (An
+  earlier version drove the whole app UI from Rust/objc2 too; that was replaced.)
 - **OpenDAL, not a hand-rolled S3 client.** OpenDAL abstracts ~40 storage
   services behind one `Operator`, so signing (SigV4), XML, retries, and
   pagination are its job. This is the whole backend roadmap (S3 → WebDAV → SFTP)
@@ -154,7 +158,9 @@ prefix).
   config lacking only the secret is *deferred* to activate (`VolumeIvars.pending`),
   not failed. (Earlier this used `-o` config chosen at `activate`; that crashed on
   the teardown path — see the source-path note.)
-- **`app/src/`** — `fskit-s3-app`, the macOS app (a status-bar app):
+- **`app/src/`** — `fskit-s3-app`, the logic + **UniFFI contract** behind the app;
+  the UI is native SwiftUI (see `xcode/host/`). All modules are dependency-light
+  Rust; `connection`/`keychain`/`s3check`/`mounts` are pure + unit-tested.
   - `connection.rs` — the `Connection`/`ConnectionKind` (`Memory` | `S3(S3Meta)`)
     model + the persisted `Registry` (`~/Library/Application Support/fskit-s3/
     connections.json`, which **never holds a secret**). `source_path()` emits the
@@ -167,58 +173,41 @@ prefix).
     `fskit-s3-backend`/OpenDAL, the same backend the extension serves with).
   - `mounts.rs` — the mount table + `mount`/`unmount` (`mount -F -t fskit-s3
     [-o …]`). No bespoke CLI — the system `mount`/`umount` are that.
-  - `addwindow.rs` — the connection form (`open` = new, `open_edit` = edit an
-    existing connection, pre-filled + name locked, with a red *Delete* button that
-    removes it after a confirmation) + the secret-prompt window (native `NSWindow`).
   - `health.rs` — the FSKit extension-health check via `FSClient`
     (`fetchInstalledExtensionsWithCompletionHandler:`, bridged to a synchronous
     `check()` with a `block2` completion + an `mpsc` channel and a short timeout):
     installed/enabled state, plus a **build-mismatch** check comparing the git SHA
     (`FSKitS3GitSHA` in the Info.plist) of the bundle FSKit will launch
-    (`FSModuleIdentity.url`) against this app's own. This is what the old standalone
-    host window did, ported into the app. `check()` **blocks**, so it's never called
-    on the main thread: both the menu controller and the health window run it via
-    `appkit::run_off_main_then_notify` (background thread → apply the result on main
-    through `performSelectorOnMainThread:`), so the latency-bound XPC round-trip never
-    stalls the UI — and running off-main also makes it robust to whichever queue FSKit
-    delivers the completion on (the main run loop keeps pumping).
-  - `healthwindow.rs` — the health window (native `NSWindow`): status + freshness +
-    launch-at-login lines, a *Re-check* button, and *Open System Settings…* that
-    deep-links to the File System Extensions pane (macOS won't let the app flip that
-    toggle itself). Raised automatically at launch when the extension isn't ready,
-    and on demand from the menu's health row.
+    (`FSModuleIdentity.url`) against this app's own. `check()` **blocks**, so the
+    SwiftUI side calls it off the main actor (a `Task.detached`).
   - `autostart.rs` — launch-at-login via `SMAppService.mainApp` (register + status);
     best-effort (a dev build that can't register just won't auto-start).
-  - `lib.rs` + `main.rs` — the app is a **library** (`fskit_s3_app`): `main.rs` is the
-    thin `cargo run` binary; `lib.rs` holds the status-bar UI + `run()` and exports the
-    C-ABI `fskit_s3_app_run` the Xcode host calls. `appkit.rs` — the status-bar UI
-    (`objc2`): a top **health row** (dot + short status, opens the health window; the
-    menu-bar glyph mirrors it), *New Connection…*, plus a submenu per connection (a
-    green/grey status dot + *Mount*/*Unmount* toggle + *Update…*). All AppKit FFI stays
-    in `appkit.rs`. A failed *Mount*/*Unmount* raises an `NSAlert`
-    (`appkit::show_error`/`confirm`) rather than only logging. `classify_mount_error`
-    maps `mount`'s terse text to a specific fix: a stale fskitd record
-    (`Code=516`/"already exists") → *run `sudo killall fskitd`* (the daemon is
-    root-owned, so the app can't clear it); *Resource busy* → unmount first; EINVAL on
-    S3 → offer *Enter Secret…* (the `-o secret` prompt, the usual fix when the
-    extension can't read the Keychain on an unsigned build).
-
-  `connection`/`keychain`/`s3check`/`mounts` are pure Rust + unit-tested.
+  - `ffi.rs` — the **UniFFI contract**: `#[uniffi::export]` functions +
+    `#[derive(uniffi::Record/Enum/Error)]` on the app-layer types — the whole surface
+    the SwiftUI app calls (health, connection CRUD + form validation, Keychain,
+    mounting, the S3 test). Presentation (SF Symbols, colours, windows) stays on the
+    Swift side; the secret only ever crosses back to pre-fill the edit form.
+  - `lib.rs` — just the module list + `uniffi::setup_scaffolding!()`. `health`/
+    `autostart` keep a small objc2 FFI (FSClient / SMAppService, looked up via
+    `class!`); there is no AppKit UI in Rust any more.
 - **`xcode/`** — the non-Rust packaging: the Swift `@main`
   `UnaryFileSystemExtension` bootstrap (returns the Rust class via
-  `fskit_s3_make_filesystem`), bridging header, entitlements, and a build recipe.
+  `fskit_s3_make_filesystem`), bridging headers, entitlements, and a build recipe.
   ExtensionKit requires this Swift entry; all file-system logic stays in Rust.
-  `xcode/host/main.swift` is the host app (macOS requires an app to vend the
-  extension) — but it's now **just a bootstrap**: it links the Rust `fskit-s3-app`
-  staticlib and calls its `fskit_s3_app_run` C entry (declared in
-  `Host-Bridging-Header.h`), so the host app *is* the status-bar app. There's no
-  separate SwiftUI host: the health check that used to be its window moved into Rust
-  (`app/src/health.rs` + `healthwindow.rs`), reached from the menu's health row and
-  auto-raised at launch when the extension isn't ready. It still flags a **build
+  `xcode/host/` is the **host app** (macOS requires an app to vend the extension) — a
+  native **SwiftUI** `MenuBarExtra` app (`App.swift`, `Health.swift`,
+  `Connections.swift`, `ConnectionForm.swift`, `Support.swift`) on top of the Rust
+  `fskit-s3-app` staticlib, reached through the UniFFI contract: `uniffi-bindgen`
+  emits the Swift bindings into `xcode/host/Generated/` (regenerated by the pre-build
+  script) and `Host-Bridging-Header.h` exposes their C ABI. The one app is the
+  menu-bar UI *and* carries the embedded `.appex`. It still flags a **build
   mismatch** (this app's `FSKitS3GitSHA` vs the extension FSKit will actually launch,
-  via `FSModuleIdentity.url`): same SHA ⇒ green; different ⇒ amber "fskitd will launch
-  a DIFFERENT build" — the content-based staleness signal (mtimes lie; git rewrites
-  them on checkout); a `-dirty` SHA is yellow since two dirty builds can share one.
+  via `FSModuleIdentity.url` in `health.rs`): same SHA ⇒ green; different ⇒ amber
+  "fskitd will launch a DIFFERENT build" — the content-based staleness signal (mtimes
+  lie; git rewrites them on checkout); a `-dirty` SHA is yellow since two dirty builds
+  can share one. Windows adopt Liquid Glass on macOS 26 (gated behind
+  `#available`, so the 15.4 minimum still gets the plain UI). The `uniffi-bindgen`
+  crate is the sibling binary that generates those bindings in library mode.
 - **`scripts/build-ext-staticlib.sh`** — Xcode Run Script phase: builds the
   `ext` staticlib for the target arch(es) and drops it in `$BUILT_PRODUCTS_DIR`.
   It exports `FSKIT_S3_GIT_SHA` (from `scripts/git-sha.sh`) so `ext/build.rs`
@@ -226,18 +215,19 @@ prefix).
   (`[fskit-s3] activate: build <sha>`), the one signal that reveals daemon-cache
   staleness (right bundle on disk, stale *loaded* process).
 - **`scripts/build-app-staticlib.sh`** — the mirror of the above for the host
-  target: builds the `fskit-s3-app` staticlib for the target arch(es) and drops
-  `libfskit_s3_app.a` in `$BUILT_PRODUCTS_DIR`, which the host links (its Swift
-  bootstrap calls the exported `fskit_s3_app_run`). No SHA env — the app reads its
-  own bundle's `FSKitS3GitSHA` (stamped by `stamp-git-sha.sh`) at runtime.
+  target: builds the `fskit-s3-app` staticlib for the target arch(es) into
+  `$BUILT_PRODUCTS_DIR` (which the SwiftUI host links), **and** regenerates the Swift
+  bindings in `xcode/host/Generated/` from the built library — skipped during SwiftUI
+  preview builds (`ENABLE_PREVIEWS`), and written only when the content changed so it
+  never churns a compiled source. No SHA env — the app reads its own bundle's
+  `FSKitS3GitSHA` (stamped by `stamp-git-sha.sh`) at runtime.
 - **`scripts/dev-app.sh`** — one-command dev install: build the host bundle
   (Debug), install it to `/Applications`, `lsregister` it, and launch. This is the
-  *only* way to get the **extension** registered — `cargo run -p fskit-s3-app`
-  builds a bare, unsigned binary with no embedded `.appex`, so macOS has nothing to
-  register as a File System Extension (registration comes only from the signed
-  `.app`, and reliably only from a stable location like `/Applications`). The
-  extension needs reinstalling only when `ext/` changes; `cargo run` is fine for
-  UI-only iteration against the already-installed extension.
+  way to get the **extension** registered — registration comes only from the signed
+  `.app`, and reliably only from a stable location like `/Applications`. There is no
+  standalone `cargo run` binary any more (the UI is the SwiftUI host); iterate the UI
+  in Xcode (SwiftUI previews) or re-run `dev-app.sh`. The extension itself needs
+  reinstalling only when `ext/` changes.
 - **`scripts/git-sha.sh`** — prints `git describe --always --dirty`; the single
   source of the build SHA. **`scripts/stamp-git-sha.sh`** — a Run Script phase on
   *both* targets that writes that SHA into the built `Info.plist` (`FSKitS3GitSHA`)
@@ -279,31 +269,31 @@ entitlement generally needs a paid Apple Developer Program membership.
 
 ### Managing mounts (the app)
 
-`fskit-s3-app` is a ☁ status-bar app. **Add mount…** opens a form to create a
-connection — **In-memory** (the demo) or **S3** (endpoint/bucket/region/access-key
-+ secret) — with *Save to Keychain*, *Mount when launching*, and *Test & Save*
-(validates S3 credentials by listing the bucket). Connections persist to
-`connections.json`; the menu mounts/unmounts them and auto-mounts the flagged ones
-at launch.
+`fskit-s3-app` is a ☁ SwiftUI menu-bar app. **New Connection…** opens a form (a
+grouped `Form` in a Liquid-Glass window) to create a connection — **In-memory** (the
+demo) or **S3** (endpoint/bucket/region/access-key + secret) — with *Save to
+Keychain*, *Mount when launching*, and *Test & Save* (validates S3 credentials by
+listing the bucket, off the main actor). Connections persist to `connections.json`;
+the menu mounts/unmounts them and auto-mounts the flagged ones at launch.
 
-There is **no bespoke CLI**: a connection is realised by the system `mount` tool
-with its config as `-o` options, so the app and a plain `mount` do the same thing:
+There is **no bespoke CLI**: a connection is realised by the system `mount` tool,
+so the SwiftUI app and a plain `mount` do the same thing. Run the app via
+`scripts/dev-app.sh` (or the installed bundle); or mount by hand — the config rides
+the **source path** (first arg), the mount point is the second:
 
 ```bash
-cargo run -p fskit-s3-app                # the app
-# …or by hand (what the app runs — the extension needs an explicit `type`):
-# the mount point doubles as the resource arg (its contents are never read), so
-# the two path args are identical.
-mount -F -t fskit-s3 -o type=memory ~/fskit-s3/memory ~/fskit-s3/memory
+# the in-memory demo (no credentials):
+mount -F -t fskit-s3 /memory ~/fskit-s3/memory
 umount ~/fskit-s3/memory
 ```
 
 **How the secret travels.** FSKit exposes **no credential API** — a mount gets a
 resource + `FSTaskOptions` (`taskOptions` = the `-o` tokens) and nothing else. So
-config rides as `-o` options, and the extension resolves the **secret** as
-`Keychain[name]` (the secure default, via a shared keychain access group) **else**
-an `-o secret` (insecure, visible in `ps`/`mount`). The extension is a **headless**
-app extension and can't prompt, so the *app* prompts for a missing secret. The
+the non-secret config rides the **source path** and the extension resolves the
+**secret** as `Keychain[name]` (the secure default, via a shared keychain access
+group) **else** an `-o secret` (insecure, visible in `ps`/`mount`). The extension is
+a **headless** app extension and can't prompt, so the *app* prompts for a missing
+secret. The
 config file never stores the secret. Sharing the Keychain item needs a signed
 build + the `keychain-access-groups` entitlement on both targets (see
 `xcode/README.md`).
@@ -475,13 +465,13 @@ truncate against a real bucket via Finder + shell — the trait and its two back
 are unit-tested; `scripts/e2e-mount.sh` now drives exactly this through a real
 `/sbin/mount`, so run it against a freshly rebuilt ext to confirm on device); verify
 the S3 read path end-to-end too (framework linking + reading the shared Keychain
-group from the `fskitd` sandbox); move the app's "Test & Save" network check off
-the main thread. Possible write follow-ups: buffer a file's writes per open handle
-and flush once (today each `writeContents` is a whole-object read-modify-write, and
-each `getAttributes` on a file costs a `stat`), and serialize concurrent writes to
-one path (parallel `writeContents` calls could race the read-modify-write).
-(Connection edit + delete are done — each connection's submenu has *Update…*, and
-the edit form has a red *Delete* button.)
+group from the `fskitd` sandbox). Possible write follow-ups: buffer a file's writes
+per open handle and flush once (today each `writeContents` is a whole-object
+read-modify-write, and each `getAttributes` on a file costs a `stat`), and serialize
+concurrent writes to one path (parallel `writeContents` calls could race the
+read-modify-write). (The app is now SwiftUI over the UniFFI contract; "Test & Save"
+already runs off the main actor. Small deferred UI bit: auto-raise the health window
+at launch when the extension isn't ready — awkward from a SwiftUI `MenuBarExtra`.)
 
 ## The Photos question (deferred)
 

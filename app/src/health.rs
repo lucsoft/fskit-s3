@@ -12,12 +12,9 @@
 //! thread-bound) — computes the [`Report`] and sends it; the caller waits with a
 //! short timeout. On timeout we report an error rather than hang.
 //!
-//! [`check`] **blocks**, so callers run it **off the main thread** (see
-//! `appkit::run_off_main_then_notify`) and apply the result back on main — the UI
-//! never waits on the XPC round-trip. Running off-main also makes the wait robust
-//! regardless of which queue FSKit delivers the completion on: the main run loop
-//! keeps pumping, so a main-queue-delivered completion still fires and wakes the
-//! background waiter.
+//! [`check`] **blocks**, so it's exported through the contract and the SwiftUI side
+//! calls it **off the main actor** (a `Task.detached`), applying the result back on
+//! the main actor — the UI never waits on the XPC round-trip.
 
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -47,13 +44,6 @@ pub enum Health {
     Error(String),
 }
 
-impl Health {
-    /// Whether the extension is usable (installed + enabled).
-    pub fn is_ready(&self) -> bool {
-        matches!(self, Health::Ready)
-    }
-}
-
 /// How the build FSKit will launch compares to the one this app ships.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum Freshness {
@@ -79,12 +69,6 @@ impl Report {
             health: Health::Error(msg.into()),
             freshness: Freshness::Unknown,
         }
-    }
-
-    /// The placeholder report before the first check completes (immediately
-    /// replaced by [`check`] at launch, so it's never shown for long).
-    pub fn initial() -> Self {
-        Report::error("checking…")
     }
 }
 
