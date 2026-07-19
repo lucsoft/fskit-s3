@@ -8,15 +8,18 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{msg_send, sel, AnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSAutoresizingMaskOptions,
-    NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlStateValueOff,
-    NSControlStateValueOn, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton,
-    NSSecureTextField, NSStatusItem, NSSwitch, NSTextAlignment, NSTextField, NSTitlePosition,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSAttributedStringAttachmentConveniences,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControl,
+    NSControlStateValueOff, NSControlStateValueOn, NSImage, NSImageSymbolConfiguration,
+    NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton, NSSecureTextField,
+    NSStatusItem, NSSwitch, NSTextAlignment, NSTextAttachment, NSTextField, NSTitlePosition,
     NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{
+    NSAttributedString, NSMutableAttributedString, NSPoint, NSRect, NSSize, NSString, NSURL,
+};
 
 /// A fresh, empty menu.
 pub fn menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
@@ -90,11 +93,94 @@ pub fn set_submenu(item: &NSMenuItem, submenu: &NSMenu) {
     item.setSubmenu(Some(submenu));
 }
 
-/// Set the glyph shown in the menu bar for a status item.
-pub fn set_status_title(item: &NSStatusItem, title: &str, mtm: MainThreadMarker) {
-    if let Some(button) = item.button(mtm) {
-        button.setTitle(&NSString::from_str(title));
+// --- SF Symbols -------------------------------------------------------------
+
+/// A semantic tint for a status SF Symbol. `None` leaves the symbol untinted
+/// (monochrome / template), which is what the menu-bar glyph wants.
+#[derive(Clone, Copy)]
+pub enum Tint {
+    None,
+    Green,
+    Orange,
+    Red,
+    Yellow,
+    /// The system secondary-label grey — an inactive/"off" state (e.g. unmounted).
+    Secondary,
+}
+
+impl Tint {
+    fn color(self) -> Option<Retained<NSColor>> {
+        Some(match self {
+            Tint::None => return None,
+            Tint::Green => NSColor::systemGreenColor(),
+            Tint::Orange => NSColor::systemOrangeColor(),
+            Tint::Red => NSColor::systemRedColor(),
+            Tint::Yellow => NSColor::systemYellowColor(),
+            Tint::Secondary => NSColor::secondaryLabelColor(),
+        })
     }
+}
+
+/// Build an SF Symbol as an `NSImage`, tinted per `tint`. Returns `None` if the
+/// symbol name isn't available on this macOS (so callers degrade gracefully rather
+/// than draw a broken glyph).
+pub fn symbol_image(name: &str, tint: Tint) -> Option<Retained<NSImage>> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(name),
+        None,
+    )?;
+    if let Some(color) = tint.color() {
+        // Hierarchical color tints the whole symbol in one hue — right for status dots.
+        let cfg = NSImageSymbolConfiguration::configurationWithHierarchicalColor(&color);
+        if let Some(configured) = image.imageWithSymbolConfiguration(&cfg) {
+            return Some(configured);
+        }
+    }
+    Some(image)
+}
+
+/// Show an SF Symbol (instead of a text glyph) in the menu bar for a status item.
+/// The image is set as a template so it adopts the menu bar's monochrome look and
+/// adapts to light/dark automatically.
+pub fn set_status_symbol(item: &NSStatusItem, name: &str, mtm: MainThreadMarker) {
+    if let Some(button) = item.button(mtm) {
+        if let Some(image) = symbol_image(name, Tint::None) {
+            image.setTemplate(true);
+            button.setImage(Some(&image));
+            // Clear any prior text glyph so only the symbol shows.
+            button.setTitle(&NSString::from_str(""));
+        }
+    }
+}
+
+/// Set a menu item's leading image to a tinted SF Symbol (a no-op if the symbol
+/// isn't available).
+pub fn set_menu_item_symbol(item: &NSMenuItem, name: &str, tint: Tint) {
+    if let Some(image) = symbol_image(name, tint) {
+        item.setImage(Some(&image));
+    }
+}
+
+/// Set a label's value to a leading tinted SF Symbol followed by `text` (an inline
+/// symbol via a text attachment). Falls back to plain text if the symbol is
+/// unavailable.
+pub fn set_symbol_line(field: &NSTextField, name: &str, tint: Tint, text: &str) {
+    let line = NSMutableAttributedString::new();
+    if let Some(image) = symbol_image(name, tint) {
+        let attachment = NSTextAttachment::new();
+        attachment.setImage(Some(&image));
+        line.appendAttributedString(&NSAttributedString::attributedStringWithAttachment(
+            &attachment,
+        ));
+        line.appendAttributedString(&plain_attributed("  "));
+    }
+    line.appendAttributedString(&plain_attributed(text));
+    field.setAttributedStringValue(&line);
+}
+
+/// A plain (unattributed) attributed string — the text runs of [`set_symbol_line`].
+fn plain_attributed(text: &str) -> Retained<NSAttributedString> {
+    NSAttributedString::initWithString(NSAttributedString::alloc(), &NSString::from_str(text))
 }
 
 /// Install a main menu with an **Edit** submenu (Cut/Copy/Paste/Select All) so

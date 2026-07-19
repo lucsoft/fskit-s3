@@ -59,6 +59,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSGeometry",
     # NSURL: build the System-Settings deep-link URL opened from the health window.
     "NSURL",
+    # NSAttributedString/NSMutableAttributedString: inline SF Symbol + text in the
+    # health-window status labels (a symbol text attachment + the message).
+    "NSAttributedString",
 ] }
 
 # AppKit: just the status-bar menu classes. objc2 gates each type/method behind
@@ -90,6 +93,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSAlert",              # the "delete this connection?" confirmation
     "NSWorkspace",          # open the System-Settings extensions pane (health window)
     "NSParagraphStyle",     # NSLineBreakMode + setLineBreakMode (wrapping status label)
+    # SF Symbols for the menu-bar glyph, menu rows, and health-window status lines:
+    "NSImage",              # the symbol image + NSImageSymbolConfiguration (same module)
+    "NSTextAttachment",     # inline symbol in an attributed label
+    "NSAttributedString",   # attributedStringWithAttachment: + setAttributedStringValue
+    "NSFont",               # NSTextAttachment/attributed-string glyph metrics
     # Superclass chain the above are gated on (NSStatusBarButton → NSButton →
     # NSControl → NSView → NSResponder; NSApplication/NSWindow → NSResponder):
     "NSButton",

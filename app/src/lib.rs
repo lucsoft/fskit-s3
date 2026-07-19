@@ -247,8 +247,8 @@ impl Controller {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let (glyph, _) = healthwindow::menu_line(&report);
-        appkit::set_status_title(&self.ivars().status_item, glyph, mtm);
+        let glyphs = healthwindow::menu_glyphs(&report);
+        appkit::set_status_symbol(&self.ivars().status_item, glyphs.bar_symbol, mtm);
         let ready = report.health.is_ready();
         *self.ivars().health.borrow_mut() = report;
 
@@ -273,18 +273,21 @@ impl Controller {
         // fresh async check whose result updates the glyph — and the row on the next
         // open — without blocking the menu. Clicking it opens the health window.
         self.refresh_health(false);
-        let health_text = {
+        let (row_symbol, row_tint, row_text) = {
             let report = self.ivars().health.borrow();
-            healthwindow::menu_line(&report).1
+            let g = healthwindow::menu_glyphs(&report);
+            (g.row_symbol, g.row_tint, g.row_text)
         };
-        menu.addItem(&appkit::menu_item(
+        let health_item = appkit::menu_item(
             mtm,
-            &health_text,
+            &row_text,
             Some(sel!(health:)),
             Some(target),
             None,
             true,
-        ));
+        );
+        appkit::set_menu_item_symbol(&health_item, row_symbol, row_tint);
+        menu.addItem(&health_item);
         menu.addItem(&appkit::separator(mtm));
 
         // Add a new connection.
@@ -314,7 +317,12 @@ impl Controller {
             let mount_point = c.default_mount_point();
             let mount_point = mount_point.to_string_lossy();
             let is_mounted = mounted.iter().any(|m| m.mount_point == *mount_point);
-            let dot = if is_mounted { "🟢" } else { "⚪️" };
+            // A filled green circle when mounted, a hollow grey one when not.
+            let (dot_symbol, dot_tint) = if is_mounted {
+                ("circle.fill", appkit::Tint::Green)
+            } else {
+                ("circle", appkit::Tint::Secondary)
+            };
 
             let submenu = appkit::menu(mtm);
             if is_mounted {
@@ -347,12 +355,13 @@ impl Controller {
 
             let row = appkit::menu_item(
                 mtm,
-                &format!("{dot}  {}  ({})", c.name, c.kind.label()),
+                &format!("{}  ({})", c.name, c.kind.label()),
                 None,
                 None,
                 None,
                 true,
             );
+            appkit::set_menu_item_symbol(&row, dot_symbol, dot_tint);
             appkit::set_submenu(&row, &submenu);
             menu.addItem(&row);
         }
@@ -496,7 +505,7 @@ pub fn run() {
 
     let status_item =
         NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-    appkit::set_status_title(&status_item, "☁", mtm);
+    appkit::set_status_symbol(&status_item, "cloud", mtm);
 
     // The controller owns the status item + menu; keep it alive for the whole run.
     let controller = Controller::new(mtm, status_item);
