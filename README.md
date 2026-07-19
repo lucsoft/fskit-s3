@@ -31,23 +31,25 @@ keys, secret saved to your Keychain) — and the menu mounts and unmounts it.
 cargo run -p fskit-s3-app
 ```
 
-There's no bespoke CLI: a connection is just the system `mount` tool with the
-config passed as `-o` options, so you can also do it by hand.
+There's no bespoke CLI: a connection is just the system `mount` tool. The config
+rides the **source path** (a self-describing `/s3/<name>?…`, which the extension
+resolves at load); only the secret travels as an `-o` option (or the Keychain).
+So you can also do it by hand.
 
 ```sh
-# -F = FSKit module, -t = which one. Path repeated on purpose: mount wants a
-# resource arg but never reads it, so the mount point stands in for it.
+# -F = FSKit module, -t = which one. The first path is the SOURCE (the config,
+# which needn't exist on disk); the second is the mount point.
 
 # Secret inline — no setup, but insecure (visible in `ps`/`mount`):
-mount -F -t fskit-s3 \
-  -o type=s3,name=photos,bucket=my-bucket,access_key_id=AKIA…,region=us-east-1,secret=s3cr3t \
-  ~/fskit-s3/photos ~/fskit-s3/photos
+mount -F -t fskit-s3 -o secret=s3cr3t \
+  "/s3/photos?bucket=my-bucket&access_key_id=AKIA…&region=us-east-1" \
+  ~/fskit-s3/photos
 
 # …or store the secret in the Keychain (item keyed by `name`), then omit it:
 security add-generic-password -U -s dev.lucsoft.fskit-s3 -a photos -w 's3cr3t'
 mount -F -t fskit-s3 \
-  -o type=s3,name=photos,bucket=my-bucket,access_key_id=AKIA…,region=us-east-1 \
-  ~/fskit-s3/photos ~/fskit-s3/photos
+  "/s3/photos?bucket=my-bucket&access_key_id=AKIA…&region=us-east-1" \
+  ~/fskit-s3/photos
 
 umount ~/fskit-s3/photos
 ```

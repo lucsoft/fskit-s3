@@ -52,11 +52,12 @@ Signing & Capabilities and let automatic signing regenerate the profiles.
    General ▸ Login Items & Extensions ▸ File System Extensions**) ▸ turn on
    *fskit-s3*. The window flips to ✓ once it's on; you can then close it — the
    extension runs on its own.
-3. Mount the demo volume. We declare `FSSupportsPathURLs`, so the resource
-   argument is a **path** (any existing one — the demo ignores it):
+3. Mount the demo volume. We declare `FSSupportsPathURLs`, so the **source** is a
+   path — and it carries the config (`/memory` selects the demo; it needn't exist
+   on disk):
    ```sh
-   mkdir -p /tmp/fskit-s3-src /tmp/fskit-s3
-   mount -F -t fskit-s3 /tmp/fskit-s3-src /tmp/fskit-s3
+   mkdir -p /tmp/fskit-s3
+   mount -F -t fskit-s3 /memory /tmp/fskit-s3
    ls /tmp/fskit-s3             # -> photos/  readme.txt
    cat /tmp/fskit-s3/readme.txt # -> mounted by fskit-s3
    ```
@@ -78,5 +79,5 @@ Command-line capture:
 
 ```sh
 log stream --predicate 'process == "fskitd" OR process == "fskit-s3-ext"' --info &
-mount -F -t fskit-s3 dummy /tmp/fskit-s3
+mount -F -t fskit-s3 /memory /tmp/fskit-s3
 ```
