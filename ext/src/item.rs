@@ -24,6 +24,14 @@ define_class!(
     unsafe impl NSObjectProtocol for S3Item {}
 );
 
+// SAFETY: an `S3Item` is immutable after construction — its ivars (`path`, `is_dir`,
+// `size`, `item_id`) are set once in `new` and only ever read — and it is only ever
+// messaged for `init`/`retain`/`release` (all thread-safe), never a main-thread-only
+// API. So a `Retained<S3Item>` is sound to move and share across the FSKit worker
+// threads and to hold in the volume's item cache.
+unsafe impl Send for S3Item {}
+unsafe impl Sync for S3Item {}
+
 impl S3Item {
     /// Create an item for `path`. The root (`"/"`) uses the reserved root id.
     pub fn new(path: String, is_dir: bool, size: u64) -> Retained<Self> {

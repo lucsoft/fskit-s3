@@ -50,6 +50,18 @@ pub struct VolumeIvars {
     /// cached listing (so Finder's size column isn't stale) without moving the
     /// directory's mtime. A missing entry is generation 0.
     dir_versions: Mutex<HashMap<String, u64>>,
+    /// The **one** `S3Item` instance per fileID that FSKit currently references.
+    ///
+    /// FSKit's model is one vnode ↔ one `FSItem`: every `lookup`/`create`/`activate`
+    /// for a given fileID must hand back the *same* object. Minting a fresh `S3Item`
+    /// each time (as this did originally) breaks that invariant, and — together with a
+    /// `reclaimItem` that never released FSKit's reference — left the driver "holding
+    /// its own reference to the object, preventing final removal" (Apple DTS): the
+    /// kernel accepts `unlink` but never dispatches `removeItem`, so deletes silently
+    /// no-op. This cache holds our +1 per live item; `reclaimItem`/`removeItem` drop it
+    /// (and balance the `into_raw` handed to FSKit), so references can reach zero and
+    /// the delete-on-last-close completes. See the delete-dispatch gotcha in CLAUDE.md.
+    items: Mutex<HashMap<FSItemID, Retained<S3Item>>>,
 }
 
 define_class!(
@@ -170,9 +182,10 @@ define_class!(
                     return;
                 }
             }
-            // FSKit holds the root item for the mount's lifetime (until
-            // reclaimItem), so transfer ownership (+1) rather than lend it.
-            let root = S3Item::new("/".to_string(), true, 0);
+            // FSKit holds the root item for the mount's lifetime (until reclaimItem),
+            // so transfer a +1 rather than lend it. Route through the item cache so the
+            // root has the same one-instance-per-fileID identity as every other item.
+            let root = self.item_for("/".to_string(), true, 0);
             let root_fsitem: *mut FSItem = Retained::into_raw(root) as *mut FSItem;
             reply.call((root_fsitem, ptr::null_mut()));
         }
@@ -250,9 +263,10 @@ define_class!(
             let child = join(dir.path(), &name_str);
             match self.ivars().rt.block_on(backend.stat(&child)) {
                 Ok(entry) => {
-                    // FSKit keeps the item (until reclaimItem) → transfer ownership.
-                    // The name is copied synchronously, so lending it is fine.
-                    let item = S3Item::new(child, entry.is_dir(), entry.size);
+                    // Return the canonical item for this fileID (same instance across
+                    // lookups) and transfer a +1 to FSKit, which keeps it until
+                    // reclaimItem. The name is copied synchronously, so lending it is fine.
+                    let item = self.item_for(child, entry.is_dir(), entry.size);
                     let fname = FSFileName::nameWithString(&NSString::from_str(&name_str));
                     reply.call((
                         Retained::into_raw(item) as *mut FSItem,
@@ -269,8 +283,19 @@ define_class!(
         }
 
         #[unsafe(method(reclaimItem:replyHandler:))]
-        fn reclaim(&self, _item: &FSItem, reply: &DynBlock<dyn Fn(*mut NSError)>) {
-            // Nothing to free: each S3Item is a plain retained object.
+        fn reclaim(&self, item: Option<&FSItem>, reply: &DynBlock<dyn Fn(*mut NSError)>) {
+            // FSKit is done with this item and releasing its reference. Two things must
+            // happen or references never reach zero (and deletes never dispatch — the
+            // whole bug): drop the cache's +1, and balance the +1 we handed FSKit via
+            // `Retained::into_raw` at lookup/create/activate. Compute the id and forget
+            // the cache entry *before* reclaiming FSKit's +1 (which may deallocate the
+            // object), then never touch `item` again.
+            if let Some(item) = item {
+                if let Some(s3) = as_s3_item(Some(item)) {
+                    self.forget_item(s3.item_id());
+                }
+                drop_retained_item(item as *const FSItem as *mut FSItem);
+            }
             reply.call((ptr::null_mut(),));
         }
 
@@ -453,8 +478,9 @@ define_class!(
                     crate::log_line(&format!("createItem {child} ({kind:?}): ok"));
                     // The parent directory's listing changed; bump it so `ls` refreshes.
                     self.touch_dir(dir.path());
-                    // FSKit keeps the item (until reclaimItem) → transfer ownership.
-                    let item = S3Item::new(child, kind == EntryKind::Dir, 0);
+                    // Canonical item for this fileID; transfer a +1 to FSKit, which
+                    // keeps it until reclaimItem.
+                    let item = self.item_for(child, kind == EntryKind::Dir, 0);
                     let fname = FSFileName::nameWithString(&NSString::from_str(&name_str));
                     reply.call((
                         Retained::into_raw(item) as *mut FSItem,
@@ -550,6 +576,7 @@ define_class!(
                 Ok(()) => {
                     crate::log_line(&format!("removeItem {child} ({kind:?}): ok"));
                     self.touch_dir(dir.path()); // parent's listing changed
+                    self.forget_item(item_id_for(&child)); // path no longer exists
                     reply.call((ptr::null_mut(),));
                 }
                 Err(e) => {
@@ -591,6 +618,9 @@ define_class!(
                     // Both the source and destination directories' listings changed.
                     self.touch_dir(corepath::parent(&src));
                     self.touch_dir(dest_dir.path());
+                    // The source path/fileID is gone; drop its cache entry so a later
+                    // lookup of that path mints a fresh item rather than a stale one.
+                    self.forget_item(item_id_for(&src));
                     let fname = FSFileName::nameWithString(&NSString::from_str(&dest_name));
                     reply.call((Retained::as_ptr(&fname) as *mut FSFileName, ptr::null_mut()));
                 }
@@ -690,6 +720,7 @@ impl S3Volume {
             rt,
             dir_mtimes: Mutex::new(HashMap::new()),
             dir_versions: Mutex::new(HashMap::new()),
+            items: Mutex::new(HashMap::new()),
         });
         unsafe { msg_send![super(this), initWithVolumeID: volume_id, volumeName: name] }
     }
@@ -711,6 +742,33 @@ impl S3Volume {
     /// `None` to EIO.
     fn backend(&self) -> Option<&Arc<dyn StorageBackend>> {
         self.ivars().backend.get()
+    }
+
+    /// The canonical `S3Item` for `path`, returned to FSKit from `lookup`/`create`/
+    /// `activate`. On first use it's created and cached (the cache keeps our +1 alive);
+    /// afterwards the *same* instance is returned, upholding FSKit's one-vnode-one-item
+    /// invariant. The returned `Retained` is a fresh clone (+1) for the caller to hand
+    /// FSKit via `into_raw`; the cache retains its own reference independently.
+    fn item_for(&self, path: String, is_dir: bool, size: u64) -> Retained<S3Item> {
+        let id = item_id_for(&path);
+        if let Ok(mut cache) = self.ivars().items.lock() {
+            if let Some(existing) = cache.get(&id) {
+                return existing.clone();
+            }
+            let item = S3Item::new(path, is_dir, size);
+            cache.insert(id, item.clone());
+            return item;
+        }
+        // Lock poisoned: fall back to an uncached instance (correctness over identity).
+        S3Item::new(path, is_dir, size)
+    }
+
+    /// Drop the cache's reference to the item with this fileID (on reclaim/remove/
+    /// rename-away). Harmless if absent.
+    fn forget_item(&self, id: FSItemID) {
+        if let Ok(mut cache) = self.ivars().items.lock() {
+            cache.remove(&id);
+        }
     }
 
     /// A directory's **entry list** changed (a create/remove/rename under it): move
@@ -873,6 +931,21 @@ fn timespec_of(t: std::time::SystemTime) -> Timespec {
 /// `None` — the caller replies a POSIX error instead of crashing.
 fn as_s3_item(item: Option<&FSItem>) -> Option<&S3Item> {
     item?.downcast_ref::<S3Item>()
+}
+
+/// Balance a `Retained::into_raw` we earlier handed FSKit (at lookup/create/activate):
+/// reconstruct the `Retained` from the pointer FSKit returns at `reclaimItem` and drop
+/// it, releasing exactly that +1. `Retained::from_raw` yields `None` for a null pointer,
+/// so that case is a harmless no-op.
+fn drop_retained_item(ptr: *mut FSItem) {
+    // SAFETY: `ptr` addresses an object we transferred to FSKit with a +1 via
+    // `Retained::into_raw`. `reclaimItem` is FSKit returning that ownership exactly once
+    // per item, so reclaiming the `Retained` here and dropping it releases precisely the
+    // reference we handed over — no double free, no dangling (the caller must not touch
+    // the item afterward).
+    unsafe {
+        drop(Retained::from_raw(ptr));
+    }
 }
 
 /// Read an `FSFileName` as a UTF-8 string.

@@ -324,6 +324,25 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
 - **Ownership**: objects FSKit keeps past the reply (the volume from `load`,
   items from `activate`/`lookup`) must be `Retained::into_raw`'d — a borrowed
   pointer dangles and crashes the extension.
+- **One `FSItem` instance per fileID, and `reclaimItem` MUST release it — or deletes
+  silently no-op.** FSKit's model is one vnode ↔ one `FSItem`; `lookup`/`create`/
+  `activate` for a given fileID must return the **same** object, and every `into_raw`
+  handed to FSKit must be balanced by a `from_raw` in `reclaimItem`. Minting a fresh
+  `S3Item` per call *and* a no-op `reclaimItem` (as this first did) leaves the driver
+  "holding its own reference to the object, preventing final removal" (Apple DTS): the
+  kernel accepts `unlink`/`rmdir` (returns exit 0) but **never dispatches `removeItem`**
+  — the object stays in the bucket while `createItem`/`renameItem`/`enumerate` all work
+  fine. The tell is that asymmetry, plus `removeItem`/`reclaimItem` never appearing in
+  `log stream`. Fix: a `VolumeIvars.items` cache (`HashMap<FSItemID, Retained<S3Item>>`)
+  returning the canonical instance via `item_for`, with `reclaimItem`/`removeItem`/
+  rename dropping the cache entry and `reclaimItem` doing `from_raw` to release FSKit's
+  +1 (`drop_retained_item`). `S3Item` is `unsafe impl Send + Sync` (immutable after
+  construction) so the `Retained` can live in the cache. This is a **known, still-open
+  FSKit bug** (Apple DTS threads 808369/808370) — even stable-identity drivers have hit
+  it, so keep the on-device `scripts/e2e-mount.sh` delete checks as the real gate. NB:
+  capabilities are *not* the gate (DTS confirmed a driver with every flag set still
+  failed), and this is a *different* layer from the readdir-staleness fix above — that
+  one runs only *after* `removeItem` dispatches.
 - **`enumerate`**: pack `FSItemAttributes` inline in `packEntry`, or entries
   don't show up in `ls`.
 - **Item attributes must be COMPLETE**, or FSKit faults
