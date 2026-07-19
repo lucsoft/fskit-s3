@@ -16,6 +16,7 @@
 #![allow(non_snake_case)]
 
 mod item;
+mod junk;
 mod oslog;
 mod sys;
 mod volume;

@@ -20,6 +20,7 @@ use tokio::runtime::Runtime;
 use fskit_s3_core::{path as corepath, EntryKind, StorageBackend, StorageError};
 
 use crate::item::{item_id_for, S3Item};
+use crate::junk::is_hidden;
 use crate::sys::*;
 
 /// Volume state carried on the ObjC instance.
@@ -212,6 +213,17 @@ define_class!(
                 ));
                 return;
             };
+            // macOS metadata litter (.DS_Store, ._*, .fseventsd, …) doesn't live in
+            // the bucket: report it absent so Finder and the OS daemons see no such
+            // item (and any copy that already leaked in stays out of sight).
+            if is_hidden(&name_str) {
+                reply.call((
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    Retained::as_ptr(&err(libc::ENOENT)) as *mut NSError,
+                ));
+                return;
+            }
             let Some(backend) = self.backend() else {
                 reply.call((
                     ptr::null_mut(),
@@ -275,6 +287,12 @@ define_class!(
             // Resume from `cookie` (the next-cookie we handed out last time).
             let parent_id = item_id_for(dir.path());
             for (i, entry) in entries.iter().enumerate().skip(cookie as usize) {
+                // Keep macOS litter out of the listing (the set `lookup` hides). The
+                // cookie is an index into the unfiltered `entries`, so skipping here
+                // leaves resume-after-buffer-full correct.
+                if is_hidden(&entry.name) {
+                    continue;
+                }
                 let fname = FSFileName::nameWithString(&NSString::from_str(&entry.name));
                 let item_type = if entry.is_dir() {
                     FS_ITEM_TYPE_DIRECTORY
@@ -373,6 +391,17 @@ define_class!(
                 ));
                 return;
             };
+            // Refuse to write macOS litter (.DS_Store, ._*, .fseventsd, …) into the
+            // bucket. EPERM is what a volume that won't create these reports; the OS
+            // daemons handle it the way they do on any read-only/network volume.
+            if is_hidden(&name_str) {
+                reply.call((
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    Retained::as_ptr(&err(libc::EPERM)) as *mut NSError,
+                ));
+                return;
+            }
             // We can model files and directories; symlinks/fifos/etc. can't live
             // in an object store, so decline them (ENOTSUP) rather than fake them.
             let kind = match item_type {

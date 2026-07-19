@@ -131,6 +131,16 @@ prefix).
   `FSKitS3Volume` — the read path (activate/lookup/getAttributes/enumerate/read)
   **and** the write path (create/write/setAttributes/remove/rename) against a
   `StorageBackend` on a tokio runtime; only symlink/hard-link ops reply `ENOTSUP`.
+  `removeItem` resolves its target from **(directory, name)**, not the `item`
+  pointer (FSKit sometimes hands callbacks a null/foreign item), so deletes can't
+  silently no-op and leak. `junk.rs`: `is_hidden` — the macOS volume-litter
+  filter. macOS treats the mount as a real local volume and its daemons write
+  `.fseventsd`/`.Spotlight-V100`/`.Trashes`/`.TemporaryItems`/`.DS_Store`/`._*`;
+  the ext refuses to create these (`createItem`→EPERM) and hides them
+  (`lookup`→ENOENT, skipped in `enumerate`) so they never reach the backend.
+  Editor scratch (`4913` probes, `.swp`, `~`) and atomic-save temps (`*.sb-*`) are
+  deliberately **not** hidden — they belong to a real write flow and are cleaned up
+  by the tool that made them.
   `lib.rs`: `FSKitS3FileSystem` (`FSUnaryFileSystem` delegate) + the exported
   `fskit_s3_make_filesystem` entry point. It **resolves the backend at
   `loadResource`** from the mount's **source path** — the config rides there as a
