@@ -1,3 +1,5 @@
+<img src="./.github/fskit-s3-iOS-Dark-1024x1024@1x.png" widht="128" height="128" style="margin: 0 0 16px" alt="fskit-s3 logo" />
+
 # fskit-s3
 
 **Mount an S3 bucket as a folder on your Mac.** Open it in Finder, browse it,
