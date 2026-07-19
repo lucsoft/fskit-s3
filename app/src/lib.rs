@@ -267,40 +267,6 @@ impl Controller {
         appkit::clear_menu(menu);
         let target: &AnyObject = self;
 
-        // Extension health — the top row (a dot + short status), reflecting the
-        // FSKit extension's installed/enabled state (and any build mismatch). The row
-        // shows the last-known state (from launch or the previous open) and kicks a
-        // fresh async check whose result updates the glyph — and the row on the next
-        // open — without blocking the menu. Clicking it opens the health window.
-        self.refresh_health(false);
-        let (row_symbol, row_tint, row_text) = {
-            let report = self.ivars().health.borrow();
-            let g = healthwindow::menu_glyphs(&report);
-            (g.row_symbol, g.row_tint, g.row_text)
-        };
-        let health_item = appkit::menu_item(
-            mtm,
-            &row_text,
-            Some(sel!(health:)),
-            Some(target),
-            None,
-            true,
-        );
-        appkit::set_menu_item_symbol(&health_item, row_symbol, row_tint);
-        menu.addItem(&health_item);
-        menu.addItem(&appkit::separator(mtm));
-
-        // Add a new connection.
-        menu.addItem(&appkit::menu_item(
-            mtm,
-            "New Connection…",
-            Some(sel!(addMount:)),
-            Some(target),
-            None,
-            true,
-        ));
-        menu.addItem(&appkit::separator(mtm));
-
         // Connections — each a dropdown with a Mount/Unmount toggle and an Update
         // action, prefixed with a status dot (green when mounted, grey when not).
         // Reloaded from disk so the Add/Edit window's changes show up immediately.
@@ -367,14 +333,43 @@ impl Controller {
         }
 
         menu.addItem(&appkit::separator(mtm));
-        menu.addItem(&appkit::menu_item(
+        // Add a new connection.
+        let new_connection = appkit::menu_item(
             mtm,
-            "Quit",
-            Some(sel!(quit:)),
+            "New Connection…",
+            Some(sel!(addMount:)),
             Some(target),
             None,
             true,
-        ));
+        );
+        appkit::set_menu_item_symbol(&new_connection, "plus", appkit::Tint::None);
+        menu.addItem(&new_connection);
+        menu.addItem(&appkit::separator(mtm));
+
+        // Extension health — the top row (a dot + short status), reflecting the
+        // FSKit extension's installed/enabled state (and any build mismatch). The row
+        // shows the last-known state (from launch or the previous open) and kicks a
+        // fresh async check whose result updates the glyph — and the row on the next
+        // open — without blocking the menu. Clicking it opens the health window.
+        self.refresh_health(false);
+        let (row_symbol, row_tint, row_text) = {
+            let report = self.ivars().health.borrow();
+            let g = healthwindow::menu_glyphs(&report);
+            (g.row_symbol, g.row_tint, g.row_text)
+        };
+        let health_item = appkit::menu_item(
+            mtm,
+            &row_text,
+            Some(sel!(health:)),
+            Some(target),
+            None,
+            true,
+        );
+        appkit::set_menu_item_symbol(&health_item, row_symbol, row_tint);
+        menu.addItem(&health_item);
+        let quit_item = appkit::menu_item(mtm, "Quit", Some(sel!(quit:)), Some(target), None, true);
+        menu.addItem(&quit_item);
+        appkit::set_menu_item_symbol(&quit_item, "xmark", appkit::Tint::None);
     }
 }
 

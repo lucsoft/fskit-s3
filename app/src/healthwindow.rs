@@ -250,7 +250,7 @@ pub struct Glyphs {
 }
 
 /// The menu-bar glyph when the extension is healthy, and when it needs attention.
-const BAR_OK: &str = "cloud";
+const BAR_OK: &str = "cloud.fill";
 const BAR_ALERT: &str = "cloud.bolt";
 
 pub fn menu_glyphs(report: &Report) -> Glyphs {
@@ -266,8 +266,8 @@ pub fn menu_glyphs(report: &Report) -> Glyphs {
     match &report.health {
         Health::Ready => Glyphs {
             bar_symbol: BAR_OK,
-            row_symbol: "checkmark.circle.fill",
-            row_tint: Tint::Green,
+            row_symbol: "checkmark",
+            row_tint: Tint::None,
             row_text: "Extension ready".to_string(),
         },
         Health::Disabled => Glyphs {
