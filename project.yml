@@ -26,6 +26,11 @@ settings:
     # .debug.dylib. The system launches app extensions directly, and the stub
     # indirection breaks that ("Unable to invoke task", no logs/crash). Off.
     ENABLE_DEBUG_DYLIB: "NO"
+    # Notarization requires the Hardened Runtime on both the app and the appex
+    # ("Hardened Runtime is Not Enabled" from the notary service otherwise). The
+    # Rust logic is a staticlib linked into each binary, so library validation
+    # has nothing external to reject.
+    ENABLE_HARDENED_RUNTIME: "YES"
 
 # You build/run the HOST app (it registers the embedded extension); an extension
 # can't run on its own. Make a scheme for it so it shows in the selector.
