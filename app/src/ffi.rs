@@ -20,26 +20,21 @@ use crate::health::Report;
 use crate::mounts::{self, Mount};
 use crate::{disksecret, keychain, s3check};
 
-/// How a connection's S3 secret reaches the extension for a mount.
+/// A connection's S3 secret for a mount, resolved by [`secret_plan`].
 ///
-/// Resolved by [`secret_plan`]. The distinction that matters is **which process can
-/// read the secret**, not merely whether one exists:
-/// - the **shared Keychain access group** is readable by the *extension itself*, so a
-///   mount needs nothing on the command line (`secret = None`);
-/// - a secret the *app* can read but the sandboxed extension can't — the **default
-///   keychain** (where the store lands on an unsigned build) or the **dev on-disk
-///   file** — must be handed over via `-o secret`.
-///
-/// Getting this wrong is the classic unsigned-build failure: the app finds the secret
-/// in its default keychain, assumes the extension can too, mounts with `None`, and the
-/// extension — which can only read the shared group — fails.
+/// The app **always hands the secret to the extension via `-o secret`** when it has
+/// one. We deliberately do *not* try to mount with `secret = None` in the hope that
+/// the extension reads the shared Keychain group itself: the app being able to read a
+/// shared-group item does **not** mean the *extension* can. On an unsigned build the
+/// app's shared-group read succeeds while the extension's fails, so that "secure" path
+/// mounts with nothing and the extension dies with `no secret` — the exact failure
+/// this avoids. (On a properly signed build the extension still prefers its own
+/// Keychain read and ignores the `-o` value, so nothing is lost there.)
 enum SecretPlan {
-    /// In the shared Keychain group — mount with `secret = None` (the ext reads it).
-    Keychain,
-    /// Readable only by the app (default keychain or dev disk file) — mount with
-    /// `-o secret` carrying this value, since the extension can't read it itself.
+    /// A secret the app could read (dev disk file first, then any Keychain copy) —
+    /// passed to the mount as `-o secret`.
     Supply(String),
-    /// No secret available anywhere — the caller must prompt / skip.
+    /// No secret anywhere — the caller must prompt (or skip, at launch).
     Missing,
 }
 
@@ -78,18 +73,12 @@ fn validate_mount_point(conn: &Connection) -> Result<(), FfiError> {
     Ok(())
 }
 
-/// Resolve where a connection's secret is and how it must travel. Prefers the shared
-/// group (the extension reads it), then the app-only stores (disk file, then default
-/// keychain) which ride `-o secret`.
+/// The secret to hand the mount: the dev on-disk **raw password** first (the user's
+/// explicit choice), then any Keychain copy; [`SecretPlan::Missing`] when there's none.
 fn secret_plan(name: &str) -> SecretPlan {
-    if keychain::read_shared_secret(name).is_some() {
-        SecretPlan::Keychain
-    } else if let Some(secret) =
-        disksecret::read(name).or_else(|| keychain::read_default_secret(name))
-    {
-        SecretPlan::Supply(secret)
-    } else {
-        SecretPlan::Missing
+    match disksecret::read(name).or_else(|| keychain::read_secret(name)) {
+        Some(secret) => SecretPlan::Supply(secret),
+        None => SecretPlan::Missing,
     }
 }
 
@@ -328,7 +317,6 @@ pub fn mount_connection(name: String) -> Result<(), FfiError> {
     let secret = if conn.is_s3() {
         match secret_plan(&name) {
             SecretPlan::Missing => return Err(FfiError::NeedsSecret),
-            SecretPlan::Keychain => None,
             SecretPlan::Supply(s) => Some(s),
         }
     } else {
@@ -398,7 +386,6 @@ pub fn auto_mount_on_launch() -> Vec<AutoMountFailure> {
             match secret_plan(&conn.name) {
                 // No secret to mount with unattended (a prompt can't run at launch).
                 SecretPlan::Missing => continue,
-                SecretPlan::Keychain => None,
                 SecretPlan::Supply(s) => Some(s),
             }
         } else {

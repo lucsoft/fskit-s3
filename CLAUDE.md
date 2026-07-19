@@ -185,14 +185,14 @@ prefix).
     (`save_secret_to_disk`). The app reads it back at mount and hands it to the ext
     via `-o secret` — no extension changes, so the secret still rides the command
     line (visible in `ps`/`mount`); the win is that one-click and launch mounts stop
-    re-prompting. `ffi::secret_plan` decides *how the secret travels* by **which
-    process can read it**, not just whether one exists: a hit in the **shared Keychain
-    group** (`keychain::read_shared_secret`) means the *extension* reads it, so the
-    mount passes `secret = None`; otherwise a secret the app alone can read — the dev
-    disk file, or the **default keychain** (where the store lands unsigned) — rides
-    `-o secret`. Conflating the two was the unsigned auto-mount bug: the app found the
-    secret in its default keychain, mounted with `None`, and the extension (shared
-    group only) failed — manual mounts survived it only because the failure prompts.
+    re-prompting. `ffi::secret_plan` **always supplies the secret via `-o secret`**
+    when the app has one — dev disk file first (the raw password), then any Keychain
+    copy — and only reports `Missing` (→ prompt/skip) when there's none. It does *not*
+    try to mount with `secret = None` hoping the extension reads the shared Keychain
+    itself: the app reading a shared-group item does **not** mean the *extension* can
+    (on an unsigned build the app's read succeeds while the ext's fails, so `None`
+    mounts nothing and the ext dies with `no secret`). On a signed build the ext still
+    prefers its own Keychain read and ignores the `-o` value, so nothing is lost.
   - `s3check.rs` — the "Test and Save" credential check (lists the bucket via
     `fskit-s3-backend`/OpenDAL, the same backend the extension serves with).
   - `mounts.rs` — the mount table + `mount`/`unmount` (`mount -F -t fskit-s3
