@@ -1,14 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Host app entitlements: the sandbox + the shared Keychain access group. The
-     app writes an S3 connection's secret to this group; the extension reads it
-     back (both targets must list the identical group, and the App ID needs the
-     "Keychain Sharing" capability — see xcode/README.md). The FSKit capability
-     lives on the extension target, not here. -->
+<!-- Host app entitlements: just the shared Keychain access group. The app writes
+     an S3 connection's secret to this group; the extension reads it back (both
+     targets must list the identical group, and the App ID needs the "Keychain
+     Sharing" capability — see xcode/README.md). The FSKit capability lives on the
+     extension target, not here.
+
+     NOTE: the app is deliberately **not** sandboxed. Its core job is to drive the
+     system `/sbin/mount` / `diskutil` tools (mounts.rs), and a sandboxed process
+     can't communicate with the mount helper — mounts fail with "Couldn't
+     communicate with a helper application" (the unsandboxed `cargo run` binary
+     mounts fine; the sandboxed bundle didn't). Sandbox isn't needed here anyway:
+     notarization requires only the Hardened Runtime (enabled in project.yml), and
+     the shared Keychain group works without the sandbox. The **extension** target
+     stays sandboxed — FSKit requires it. With no sandbox, network access is
+     unrestricted (no `network.client` entitlement needed); the Local Network
+     privacy prompt still applies to LAN endpoints (see NSLocalNetworkUsageDescription
+     in project.yml). -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
     <key>keychain-access-groups</key>
     <array>
         <string>$(AppIdentifierPrefix)dev.lucsoft.fskit-s3</string>
