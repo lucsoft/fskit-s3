@@ -43,7 +43,12 @@ schemes:
       config: Debug
 
 targets:
-  # -- Host app: a shell that carries the extension. --
+  # -- Host app: carries the extension AND is the status-bar app. --
+  # The whole app (status-bar UI, mounts, extension-health window) is the Rust
+  # `fskit-s3-app` library, linked here as a staticlib; the Swift bootstrap
+  # (xcode/host/main.swift) just calls its `fskit_s3_app_run` C entry. So there's
+  # one app: it vends the embedded FSKit extension and runs the UI — no separate
+  # host to keep in sync. Mirror of the fskit-s3-ext target's staticlib linking.
   fskit-s3-host:
     type: application
     platform: macOS
@@ -55,15 +60,33 @@ targets:
         PRODUCT_NAME: fskit-s3
         CODE_SIGN_ENTITLEMENTS: xcode/App.entitlements
         GENERATE_INFOPLIST_FILE: "YES"
+        # Status-bar (accessory) app: no Dock tile, no main window.
         INFOPLIST_KEY_LSUIElement: "YES"
+        SWIFT_OBJC_BRIDGING_HEADER: xcode/host/Host-Bridging-Header.h
+        # Link the Rust app staticlib (built by the pre-build script below).
+        OTHER_LDFLAGS: "-L$(BUILT_PRODUCTS_DIR) -lfskit_s3_app"
+    preBuildScripts:
+      - name: "Build Rust staticlib (fskit-s3-app)"
+        script: '"$PROJECT_DIR/scripts/build-app-staticlib.sh"'
+        basedOnDependencyAnalysis: false
     dependencies:
       - target: fskit-s3-ext
         embed: true
-      # The host window's health check queries FSClient (installed/enabled state).
+      # Frameworks the Rust app staticlib references (objc2 crates don't auto-link;
+      # the final target must). AppKit/Foundation/CoreFoundation: the status-bar UI.
+      # FSKit: the FSClient extension-health query. ServiceManagement: SMAppService
+      # launch-at-login. Security + SystemConfiguration: the Keychain + the OpenDAL/
+      # reqwest/rustls S3 "Test & Save" check (same as the ext target).
+      - sdk: AppKit.framework
+      - sdk: Foundation.framework
+      - sdk: CoreFoundation.framework
       - sdk: FSKit.framework
+      - sdk: ServiceManagement.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
     postBuildScripts:
       # Stamp this app's git SHA into its Info.plist (runs before code-signing),
-      # so the health window can compare it against the extension's SHA.
+      # so the health check can compare it against the extension's SHA.
       - name: "Stamp git SHA (host)"
         script: '"$PROJECT_DIR/scripts/stamp-git-sha.sh"'
         basedOnDependencyAnalysis: false

@@ -13,6 +13,17 @@ license.workspace = true
 name = "fskit-s3-app"
 path = "src/main.rs"
 
+# The app logic is a library so it can be linked two ways: `rlib` for the
+# standalone `cargo run` binary above, and `staticlib` for the Xcode host target
+# (`fskit-s3-host`), which links it and calls the C-ABI `fskit_s3_app_run` entry —
+# exactly how the `ext` staticlib is linked into the extension target. That lets a
+# single Rust app both run standalone in dev and be the app that carries the FSKit
+# extension, so there's no separate Swift host app to keep in sync.
+[lib]
+name = "fskit_s3_app"
+path = "src/lib.rs"
+crate-type = ["staticlib", "rlib"]
+
 [dependencies]
 # Connection persistence: the app-local connections.json (never holds secrets).
 serde = { version = "1", features = ["derive"] }
@@ -37,11 +48,17 @@ tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-t
 # only default feature is `std`, which we keep.
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
 
+# `RcBlock` — the FSKit `FSClient` health query takes an ObjC completion block
+# (`void(^)(NSArray*, NSError*)`). `std` is block2's default.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+
 # Foundation: NSString bridging + NSGeometry (NSRect/NSPoint/NSSize for control frames).
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
     "NSGeometry",
+    # NSURL: build the System-Settings deep-link URL opened from the health window.
+    "NSURL",
 ] }
 
 # AppKit: just the status-bar menu classes. objc2 gates each type/method behind
@@ -71,6 +88,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSCell",               # NSControlStateValue{On,Off} for checkbox/switch state
     "NSColor",              # systemRed bezel + the grouped-section fill color
     "NSAlert",              # the "delete this connection?" confirmation
+    "NSWorkspace",          # open the System-Settings extensions pane (health window)
     "NSParagraphStyle",     # NSLineBreakMode + setLineBreakMode (wrapping status label)
     # Superclass chain the above are gated on (NSStatusBarButton → NSButton →
     # NSControl → NSView → NSResponder; NSApplication/NSWindow → NSResponder):

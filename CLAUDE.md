@@ -170,39 +170,66 @@ prefix).
   - `addwindow.rs` — the connection form (`open` = new, `open_edit` = edit an
     existing connection, pre-filled + name locked, with a red *Delete* button that
     removes it after a confirmation) + the secret-prompt window (native `NSWindow`).
-  - `main.rs` + `appkit.rs` — the status-bar UI (`objc2`): *New Connection…* plus a
-    submenu per connection (a green/grey status dot + *Mount*/*Unmount* toggle +
-    *Update…*). All AppKit FFI stays in `appkit.rs`. A failed *Mount*/*Unmount*
-    raises an `NSAlert` (`appkit::show_error`/`confirm`) rather than only logging.
-    `classify_mount_error` maps `mount`'s terse text to a specific fix: a stale
-    fskitd record (`Code=516`/"already exists") → *run `sudo killall fskitd`* (the
-    daemon is root-owned, so the app can't clear it); *Resource busy* → unmount
-    first; EINVAL on S3 → offer *Enter Secret…* (the `-o secret` prompt, the usual
-    fix when the extension can't read the Keychain on an unsigned build).
+  - `health.rs` — the FSKit extension-health check via `FSClient`
+    (`fetchInstalledExtensionsWithCompletionHandler:`, bridged to a synchronous
+    `check()` with a `block2` completion + an `mpsc` channel and a short timeout):
+    installed/enabled state, plus a **build-mismatch** check comparing the git SHA
+    (`FSKitS3GitSHA` in the Info.plist) of the bundle FSKit will launch
+    (`FSModuleIdentity.url`) against this app's own. This is what the old standalone
+    host window did, ported into the app. `check()` **blocks**, so it's never called
+    on the main thread: both the menu controller and the health window run it via
+    `appkit::run_off_main_then_notify` (background thread → apply the result on main
+    through `performSelectorOnMainThread:`), so the latency-bound XPC round-trip never
+    stalls the UI — and running off-main also makes it robust to whichever queue FSKit
+    delivers the completion on (the main run loop keeps pumping).
+  - `healthwindow.rs` — the health window (native `NSWindow`): status + freshness +
+    launch-at-login lines, a *Re-check* button, and *Open System Settings…* that
+    deep-links to the File System Extensions pane (macOS won't let the app flip that
+    toggle itself). Raised automatically at launch when the extension isn't ready,
+    and on demand from the menu's health row.
+  - `autostart.rs` — launch-at-login via `SMAppService.mainApp` (register + status);
+    best-effort (a dev build that can't register just won't auto-start).
+  - `lib.rs` + `main.rs` — the app is a **library** (`fskit_s3_app`): `main.rs` is the
+    thin `cargo run` binary; `lib.rs` holds the status-bar UI + `run()` and exports the
+    C-ABI `fskit_s3_app_run` the Xcode host calls. `appkit.rs` — the status-bar UI
+    (`objc2`): a top **health row** (dot + short status, opens the health window; the
+    menu-bar glyph mirrors it), *New Connection…*, plus a submenu per connection (a
+    green/grey status dot + *Mount*/*Unmount* toggle + *Update…*). All AppKit FFI stays
+    in `appkit.rs`. A failed *Mount*/*Unmount* raises an `NSAlert`
+    (`appkit::show_error`/`confirm`) rather than only logging. `classify_mount_error`
+    maps `mount`'s terse text to a specific fix: a stale fskitd record
+    (`Code=516`/"already exists") → *run `sudo killall fskitd`* (the daemon is
+    root-owned, so the app can't clear it); *Resource busy* → unmount first; EINVAL on
+    S3 → offer *Enter Secret…* (the `-o secret` prompt, the usual fix when the
+    extension can't read the Keychain on an unsigned build).
 
   `connection`/`keychain`/`s3check`/`mounts` are pure Rust + unit-tested.
 - **`xcode/`** — the non-Rust packaging: the Swift `@main`
   `UnaryFileSystemExtension` bootstrap (returns the Rust class via
   `fskit_s3_make_filesystem`), bridging header, entitlements, and a build recipe.
   ExtensionKit requires this Swift entry; all file-system logic stays in Rust.
-  `xcode/host/FskitS3HostApp.swift` is the host app (macOS requires an app to vend
-  the extension) — its window is a **live health check** that queries
-  `FSClient.installedExtensions` for our module's installed/enabled state and
-  self-refreshes, so enabling it in Settings flips it to ✓ (macOS won't let an app
-  toggle a file-system extension itself, so it deep-links to the Settings pane).
-  It also flags a **build mismatch**: it compares its own git SHA (`FSKitS3GitSHA`
-  in its Info.plist) against that of the extension FSKit will actually launch
-  (`FSModuleIdentity.url` → that bundle's `FSKitS3GitSHA`). Same SHA ⇒ green; a
-  different SHA ⇒ amber "fskitd will launch a DIFFERENT build" — the reliable,
-  content-based staleness signal (mtimes lie; git rewrites them on checkout). A
-  `-dirty` SHA is shown yellow since two dirty builds can share a SHA. You can
-  close it once ready — the extension runs in its own `fskitd`-launched process.
+  `xcode/host/main.swift` is the host app (macOS requires an app to vend the
+  extension) — but it's now **just a bootstrap**: it links the Rust `fskit-s3-app`
+  staticlib and calls its `fskit_s3_app_run` C entry (declared in
+  `Host-Bridging-Header.h`), so the host app *is* the status-bar app. There's no
+  separate SwiftUI host: the health check that used to be its window moved into Rust
+  (`app/src/health.rs` + `healthwindow.rs`), reached from the menu's health row and
+  auto-raised at launch when the extension isn't ready. It still flags a **build
+  mismatch** (this app's `FSKitS3GitSHA` vs the extension FSKit will actually launch,
+  via `FSModuleIdentity.url`): same SHA ⇒ green; different ⇒ amber "fskitd will launch
+  a DIFFERENT build" — the content-based staleness signal (mtimes lie; git rewrites
+  them on checkout); a `-dirty` SHA is yellow since two dirty builds can share one.
 - **`scripts/build-ext-staticlib.sh`** — Xcode Run Script phase: builds the
   `ext` staticlib for the target arch(es) and drops it in `$BUILT_PRODUCTS_DIR`.
   It exports `FSKIT_S3_GIT_SHA` (from `scripts/git-sha.sh`) so `ext/build.rs`
   compiles the SHA into the staticlib — the extension logs it at `activate`
   (`[fskit-s3] activate: build <sha>`), the one signal that reveals daemon-cache
   staleness (right bundle on disk, stale *loaded* process).
+- **`scripts/build-app-staticlib.sh`** — the mirror of the above for the host
+  target: builds the `fskit-s3-app` staticlib for the target arch(es) and drops
+  `libfskit_s3_app.a` in `$BUILT_PRODUCTS_DIR`, which the host links (its Swift
+  bootstrap calls the exported `fskit_s3_app_run`). No SHA env — the app reads its
+  own bundle's `FSKitS3GitSHA` (stamped by `stamp-git-sha.sh`) at runtime.
 - **`scripts/git-sha.sh`** — prints `git describe --always --dirty`; the single
   source of the build SHA. **`scripts/stamp-git-sha.sh`** — a Run Script phase on
   *both* targets that writes that SHA into the built `Info.plist` (`FSKitS3GitSHA`)

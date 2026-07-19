@@ -14,9 +14,9 @@ use objc2_app_kit::{
     NSBackingStoreType, NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlStateValueOff,
     NSControlStateValueOn, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSPopUpButton,
     NSSecureTextField, NSStatusItem, NSSwitch, NSTextAlignment, NSTextField, NSTitlePosition,
-    NSView, NSWindow, NSWindowStyleMask,
+    NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
 
 /// A fresh, empty menu.
 pub fn menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
@@ -386,6 +386,67 @@ pub fn set_button_destructive(button: &NSButton) {
     button.setHasDestructiveAction(true);
     let red = NSColor::systemRedColor().colorWithAlphaComponent(0.5);
     button.setBezelColor(Some(&red));
+}
+
+/// Run `work` on a background thread, then message `selector` on `target` back on
+/// the **main** thread (via `performSelectorOnMainThread:`). The pattern for a
+/// latency-bound call (a network/XPC round-trip) that must not block the UI: do
+/// the blocking work off-main, stash its result somewhere the selector can read,
+/// and let the selector apply it on the main thread.
+///
+/// Only a raw pointer + selector cross the thread boundary, and they're used
+/// solely to enqueue a main-thread message — never to touch the object's Rust
+/// state off-main. `performSelectorOnMainThread:` retains `target` until the
+/// selector runs, so it can't be freed underneath the pending message.
+pub fn run_off_main_then_notify<F>(target: &AnyObject, selector: Sel, work: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    struct Hop {
+        target: *const AnyObject,
+        selector: Sel,
+    }
+    // SAFETY: the pointer is only ever used to send a thread-safe ObjC message
+    // (`performSelectorOnMainThread:`), never to access the object off the main
+    // thread; the selector is a process-global immutable value.
+    unsafe impl Send for Hop {}
+
+    let hop = Hop {
+        target: target as *const AnyObject,
+        selector,
+    };
+    std::thread::spawn(move || {
+        // Bind the whole struct so the closure captures `Hop` (which is `Send`),
+        // not its raw-pointer field on its own (edition-2021 disjoint capture).
+        let hop = hop;
+        work();
+        // SAFETY: `performSelectorOnMainThread:withObject:waitUntilDone:` is safe to
+        // call from any thread; it schedules the selector on the main run loop and
+        // retains the receiver until it runs. `hop.target` was a live object when
+        // this call was made and stays valid for the app's lifetime.
+        unsafe {
+            if let Some(obj) = (hop.target as *mut AnyObject).as_ref() {
+                let _: () = msg_send![
+                    obj,
+                    performSelectorOnMainThread: hop.selector,
+                    withObject: core::ptr::null_mut::<AnyObject>(),
+                    waitUntilDone: false,
+                ];
+            }
+        }
+    });
+}
+
+/// Open **System Settings ▸ General ▸ Login Items & Extensions ▸ File System
+/// Extensions** — where the user enables the extension (macOS won't let the app
+/// flip that toggle itself). Best-effort: a bad URL or refused open is ignored.
+pub fn open_extensions_settings() {
+    let url = NSURL::URLWithString(&NSString::from_str(
+        "x-apple.systempreferences:com.apple.ExtensionsPreferences",
+    ));
+    if let Some(url) = url {
+        NSWorkspace::sharedWorkspace().openURL(&url);
+    }
 }
 
 /// Show a modal error alert with a single OK button.

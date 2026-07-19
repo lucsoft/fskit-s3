@@ -11,21 +11,25 @@ so WebDAV, SFTP, and ~40 other services are a feature flag away.
 
 ## Quick start
 
-**First, install the extension.** macOS loads the filesystem from a host app.
-Generate the Xcode project, then build and run the host:
+**First, install the extension.** macOS loads the filesystem from a host app —
+which here is the app itself. Generate the Xcode project, then build and run it:
 
 ```sh
 xcodegen generate && open fskit-s3.xcodeproj   # pick your team, Build & Run fskit-s3-host
 ```
 
-The host (`fskit-s3-host`) vends the `fskit-s3-ext` extension; enable it in
-**System Settings ▸ Login Items & Extensions ▸ File System Extensions**. Signing
-and the FSKit entitlement (needs a paid Apple team) are covered in
-[`CLAUDE.md`](CLAUDE.md).
+The app (`fskit-s3-host`) vends the `fskit-s3-ext` extension; enable it in
+**System Settings ▸ Login Items & Extensions ▸ File System Extensions**. On first
+launch the app's ☁ menu shows the extension's health and, if it isn't enabled yet,
+pops a window that deep-links you straight to that pane. It also registers itself
+to launch at login. Signing and the FSKit entitlement (needs a paid Apple team)
+are covered in [`CLAUDE.md`](CLAUDE.md).
 
-**Then mount something.** The app is a ☁ menu-bar item. **Add mount…** creates a
-connection — an in-memory demo, or an S3 bucket (endpoint / bucket / region /
-keys, secret saved to your Keychain) — and the menu mounts and unmounts it.
+**Then mount something.** The app is a ☁ menu-bar item (its top row is the
+extension's health). **Add mount…** creates a connection — an in-memory demo, or
+an S3 bucket (endpoint / bucket / region / keys, secret saved to your Keychain) —
+and the menu mounts and unmounts it. For development you can run the same app
+standalone, without building the host bundle:
 
 ```sh
 cargo run -p fskit-s3-app

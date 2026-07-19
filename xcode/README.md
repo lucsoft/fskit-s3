@@ -46,12 +46,14 @@ Signing & Capabilities and let automatic signing regenerate the profiles.
 ## Build, install, mount
 
 1. Scheme **fskit-s3-host** ▸ **Build & Run** (this signs + registers the extension).
-   The host window is a **live health check** (via `FSClient`): it shows whether
-   the extension is installed + enabled and self-refreshes.
-2. Enable it: click **Open System Settings…** in that window (or **System Settings ▸
-   General ▸ Login Items & Extensions ▸ File System Extensions**) ▸ turn on
-   *fskit-s3*. The window flips to ✓ once it's on; you can then close it — the
-   extension runs on its own.
+   The app is a ☁ **status-bar** app; its top menu row is a **live health check**
+   (via `FSClient`, in Rust) showing whether the extension is installed + enabled,
+   and it registers itself to launch at login. When the extension isn't ready it
+   pops a health window automatically.
+2. Enable it: click **Open System Settings…** in the health window (its top menu
+   row opens it too), or **System Settings ▸ General ▸ Login Items & Extensions ▸
+   File System Extensions** ▸ turn on *fskit-s3*. **Re-check** flips it to ✓ once
+   it's on; close the window — the extension runs on its own.
 3. Mount the demo volume. We declare `FSSupportsPathURLs`, so the **source** is a
    path — and it carries the config (`/memory` selects the demo; it needn't exist
    on disk):
