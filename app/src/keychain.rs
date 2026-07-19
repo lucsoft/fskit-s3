@@ -43,12 +43,31 @@ pub fn store_secret(name: &str, secret: &str) -> Result<(), String> {
     }
 }
 
-/// Read a connection's secret, if present (shared group first, then default).
-pub fn read_secret(name: &str) -> Option<String> {
-    let bytes = generic_password(options(name, true))
-        .or_else(|_| generic_password(options(name, false)))
-        .ok()?;
+/// Read a connection's secret from the **shared access group only** — the item the
+/// *extension* can read. A hit here means a mount can rely on `Keychain[name]`
+/// (no `-o secret`); a miss means the secret is at best in the app-only default
+/// keychain, which the sandboxed extension can't see. On an unsigned build (no
+/// entitlement) the shared-group query never matches, so this returns `None` — which
+/// is exactly the signal the mount path needs to fall back to passing `-o secret`.
+pub fn read_shared_secret(name: &str) -> Option<String> {
+    let bytes = generic_password(options(name, true)).ok()?;
     String::from_utf8(bytes).ok()
+}
+
+/// Read a connection's secret from the **default keychain only** — readable by the
+/// app but NOT by the sandboxed extension, so a mount must hand it over via
+/// `-o secret`. This is where the secret lands on an unsigned build (the shared-group
+/// store falls back here).
+pub fn read_default_secret(name: &str) -> Option<String> {
+    let bytes = generic_password(options(name, false)).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Read a connection's secret from anywhere the app can (shared group first, then
+/// default) — for pre-filling the edit form, where only *whether* a secret exists and
+/// its value matter, not which store the extension can reach.
+pub fn read_secret(name: &str) -> Option<String> {
+    read_shared_secret(name).or_else(|| read_default_secret(name))
 }
 
 /// Delete a connection's secret from both the shared group and the default keychain.

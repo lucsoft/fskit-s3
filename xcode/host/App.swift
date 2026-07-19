@@ -70,7 +70,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Auto-mount the flagged connections, then reflect the new mount state.
             // (The launch health check + auto-raise lives in the menu-bar label,
             // which is the always-present view that can call `openWindow`.)
-            await Task.detached { _ = autoMountOnLaunch() }.value
+            let failed = await Task.detached { autoMountOnLaunch() }.value
+            if !failed.isEmpty {
+                // Auto-mount is best-effort and can't prompt; log the misses so a
+                // silent launch failure is at least visible in Console / `log stream`.
+                NSLog("fskit-s3: auto-mount failed for: \(failed.joined(separator: ", "))")
+            }
             await model.refreshConnections()
         }
     }
