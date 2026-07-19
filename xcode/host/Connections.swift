@@ -63,12 +63,6 @@ private struct ConnectionMenu: View {
                 }
             }
             // The mount folder + a shortcut to reveal it in Finder.
-            Text(mountPath)
-            Button {
-                openInFinder(mountPath)
-            } label: {
-                Label("Open in Finder", systemImage: "folder")
-            }
             Divider()
             Button {
                 activateAndOpen {
@@ -76,6 +70,13 @@ private struct ConnectionMenu: View {
                 }
             } label: {
                 Label("Configure...", systemImage: "gear")
+            }
+            Divider()
+            Text(mountPath)
+            Button {
+                openInFinder(mountPath)
+            } label: {
+                Label("Open in Finder", systemImage: "folder")
             }
         } label: {
             Label {
