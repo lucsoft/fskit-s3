@@ -193,6 +193,12 @@ prefix).
   `log_line` routes through here instead. Filter with
   `log stream --predicate 'subsystem == "dev.lucsoft.fskit-s3"'`.
 - **`compose.yaml`** — RustFS (S3-compatible) for local backend testing.
+- **`README.md`** (user-facing quickstart) and **`xcode/README.md`** (build /
+  enable / triage) both carry **by-hand `mount` examples**. They embed the mount
+  contract — the source-path form (`/s3/<name>?bucket=..&..`, `/memory`) and how
+  the secret travels — so **update them whenever that contract changes** (e.g. the
+  `-o`-config → source-path migration), or they drift into commands that no longer
+  work.
 
 ## Build & test
 
