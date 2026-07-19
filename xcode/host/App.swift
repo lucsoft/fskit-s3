@@ -52,6 +52,60 @@ final class AppModel {
     func registerLoginItem() {
         Task.detached { enableAutostart() }
     }
+
+    /// Mount the named connections again (off the main actor), returning the ones that
+    /// still failed, with their reason. Used by the auto-mount failure recovery.
+    @MainActor
+    func retryMounts(_ names: [String]) async -> [AutoMountFailure] {
+        var stillFailed: [AutoMountFailure] = []
+        for name in names {
+            do {
+                try await Task.detached { try mountConnection(name: name) }.value
+            } catch let error as FfiError {
+                stillFailed.append(AutoMountFailure(connection: name, reason: ffiMessage(error)))
+            } catch {
+                stillFailed.append(AutoMountFailure(connection: name, reason: "\(error)"))
+            }
+        }
+        await refreshConnections()
+        return stillFailed
+    }
+
+    /// Offer to recover from failed auto-mounts: a modal loop of Retry / Restart
+    /// Extension & Retry / Dismiss until everything mounts or the user gives up.
+    /// **Retry** re-mounts just the failed ones (existing mounts untouched); **Restart
+    /// Extension & Retry** restarts fskitd (clearing a "Resource busy" stuck instance,
+    /// which also drops every mount) and then re-mounts *all* flagged connections.
+    @MainActor
+    func handleAutoMountFailures(_ initial: [AutoMountFailure]) async {
+        var failures = initial
+        while !failures.isEmpty {
+            let title = failures.count == 1
+                ? "“\(failures[0].connection)” couldn’t be mounted"
+                : "\(failures.count) connections couldn’t be mounted"
+            let detail = failures.map { "\($0.connection): \($0.reason)" }.joined(separator: "\n\n")
+            switch autoMountFailureAlert(title, detail) {
+            case .dismiss:
+                return
+            case .retry:
+                failures = await retryMounts(failures.map(\.connection))
+            case .restartAndRetry:
+                do {
+                    try await Task.detached { try restartExtension() }.value
+                    try? await Task.sleep(for: .seconds(1)) // let launchd bring fskitd back
+                } catch let error as FfiError {
+                    showError("Couldn’t restart the extension", ffiMessage(error))
+                    continue // keep the loop so the user can retry or dismiss
+                } catch {
+                    showError("Couldn’t restart the extension", "\(error)")
+                    continue
+                }
+                // fskitd was killed, dropping every mount — re-mount all flagged ones.
+                failures = await Task.detached { autoMountOnLaunch() }.value
+                await refreshConnections()
+            }
+        }
+    }
 }
 
 /// Launch/quit hook: an accessory (menu-bar) app has no window at launch, so this
@@ -66,18 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // auto-mount) when previewing.
         guard !isRunningInPreview else { return }
         model.registerLoginItem()
-        Task {
-            // Auto-mount the flagged connections, then reflect the new mount state.
-            // (The launch health check + auto-raise lives in the menu-bar label,
-            // which is the always-present view that can call `openWindow`.)
-            let failed = await Task.detached { autoMountOnLaunch() }.value
-            // Auto-mount is best-effort and can't prompt; log each miss *with its
-            // reason* so a silent launch failure is diagnosable in Console / `log stream`.
-            for failure in failed {
-                NSLog("fskit-s3: auto-mount failed for \(failure.connection): \(failure.reason)")
-            }
-            await model.refreshConnections()
-        }
+        // The whole launch sequence — health check, auto-mount (+ failure recovery),
+        // and secret prompts — runs in the menu-bar label's `.task`, the one
+        // always-present view that can call `openWindow`.
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -150,14 +195,20 @@ struct MenuBarLabel: View {
                 await model.refresh()
                 guard case .ready = model.report.health else {
                     // Not ready: nudge toward the System Settings toggle and don't
-                    // bother prompting for secrets (a mount can't succeed yet anyway).
+                    // auto-mount (a mount can't succeed yet anyway).
                     activateAndOpen { openWindow(id: HealthWindow.id) }
                     return
                 }
-                // Ready: the headless auto-mount (in the AppDelegate) handled the
-                // connections whose secret is available; prompt for any launch-flagged
-                // one still missing its secret, so "mount when launching" completes
-                // with the user typing the password.
+                // Ready: auto-mount the flagged connections whose secret is available.
+                let failed = await Task.detached { autoMountOnLaunch() }.value
+                for failure in failed {
+                    NSLog("fskit-s3: auto-mount failed for \(failure.connection): \(failure.reason)")
+                }
+                await model.refreshConnections()
+                // Offer Retry / Restart Extension & Retry for any that failed…
+                await model.handleAutoMountFailures(failed)
+                // …then prompt for any launch-flagged connection still missing a secret,
+                // so "mount when launching" completes with the user typing the password.
                 let pending = await Task.detached { pendingSecretMountsOnLaunch() }.value
                 for name in pending {
                     activateAndOpen { openWindow(value: SecretPromptRequest(name: name)) }

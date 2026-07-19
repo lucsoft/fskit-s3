@@ -318,6 +318,12 @@ RustBuffer uniffi_fskit_s3_app_fn_func_pending_secret_mounts_on_launch(RustCallS
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_RESTART_EXTENSION
+#define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_RESTART_EXTENSION
+void uniffi_fskit_s3_app_fn_func_restart_extension(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_SAVE_CONNECTION
 #define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_SAVE_CONNECTION
 RustBuffer uniffi_fskit_s3_app_fn_func_save_connection(RustBuffer form, RustBuffer original_name, RustCallStatus *_Nonnull out_status
@@ -693,6 +699,12 @@ uint16_t uniffi_fskit_s3_app_checksum_func_mount_with_secret(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_CHECKSUM_FUNC_PENDING_SECRET_MOUNTS_ON_LAUNCH
 #define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_CHECKSUM_FUNC_PENDING_SECRET_MOUNTS_ON_LAUNCH
 uint16_t uniffi_fskit_s3_app_checksum_func_pending_secret_mounts_on_launch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_CHECKSUM_FUNC_RESTART_EXTENSION
+#define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_CHECKSUM_FUNC_RESTART_EXTENSION
+uint16_t uniffi_fskit_s3_app_checksum_func_restart_extension(void
     
 );
 #endif

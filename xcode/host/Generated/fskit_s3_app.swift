@@ -1805,6 +1805,16 @@ public func pendingSecretMountsOnLaunch() -> [String] {
 })
 }
 /**
+ * Restart the FSKit daemon (`killall fskitd`, elevated) to clear a "Resource busy"
+ * stuck instance, so the caller can retry mounting. Needs admin rights — macOS shows
+ * its own auth dialog; cancelling it returns an error. See [`mounts::restart_fskitd`].
+ */
+public func restartExtension()throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
+    uniffi_fskit_s3_app_fn_func_restart_extension($0
+    )
+}
+}
+/**
  * Validate + **save** a connection (the form's "Test & Save"): for S3, list the
  * bucket to confirm the credentials, store the secret in the Keychain when asked,
  * then persist the connection. `original_name` is `Some` when editing (the prior
@@ -1912,6 +1922,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_fskit_s3_app_checksum_func_pending_secret_mounts_on_launch() != 60599) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_fskit_s3_app_checksum_func_restart_extension() != 5230) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_fskit_s3_app_checksum_func_save_connection() != 8212) {

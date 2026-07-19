@@ -181,6 +181,33 @@ pub fn unmount(mount_point: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Restart the FSKit daemon to clear an accumulated **stuck instance** — the state
+/// behind a mount failing at probe with "Resource busy" (a prior mount whose activate
+/// failed doesn't unwind, so fskitd keeps the instance). `killall fskitd`; launchd
+/// relaunches it on demand, so the next mount starts clean.
+///
+/// fskitd runs as **root**, so this elevates via `osascript … with administrator
+/// privileges`: macOS shows its own authentication dialog and the app never sees the
+/// password. `|| true` so "no matching processes" (already gone) isn't an error.
+/// Cancelling the auth dialog surfaces as a friendly message.
+pub fn restart_fskitd() -> Result<(), String> {
+    let out = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(r#"do shell script "killall fskitd || true" with administrator privileges"#)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = stderr_or_status(&out);
+    // osascript reports a user-cancelled auth dialog as error -128.
+    if err.contains("-128") {
+        Err("Restart cancelled.".to_string())
+    } else {
+        Err(err)
+    }
+}
+
 /// The stderr of a failed command, trimmed; falls back to the exit status when
 /// the tool wrote nothing (so the error is never an empty string).
 fn stderr_or_status(out: &std::process::Output) -> String {

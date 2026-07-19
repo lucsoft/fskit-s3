@@ -363,6 +363,14 @@ pub fn unmount(mount_point: String) -> Result<(), FfiError> {
     mounts::unmount(&mount_point).map_err(FfiError::from)
 }
 
+/// Restart the FSKit daemon (`killall fskitd`, elevated) to clear a "Resource busy"
+/// stuck instance, so the caller can retry mounting. Needs admin rights — macOS shows
+/// its own auth dialog; cancelling it returns an error. See [`mounts::restart_fskitd`].
+#[uniffi::export]
+pub fn restart_extension() -> Result<(), FfiError> {
+    mounts::restart_fskitd().map_err(FfiError::from)
+}
+
 /// A connection that failed to auto-mount at launch, with the reason — so the log
 /// (and any future UI) shows *why*, not just which one.
 #[derive(Debug, Clone, uniffi::Record)]

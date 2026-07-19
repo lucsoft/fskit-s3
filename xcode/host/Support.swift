@@ -215,6 +215,29 @@ func openInFinder(_ path: String) {
     }
 }
 
+/// What the user chose in the auto-mount failure alert.
+enum AutoMountFailureChoice { case retry, restartAndRetry, dismiss }
+
+/// A modal alert offering to recover from failed auto-mounts: **Retry** (mount the
+/// failed ones again), **Restart Extension & Retry** (`killall fskitd` — the reset for
+/// a "Resource busy" stuck instance — then re-mount), or **Dismiss**.
+@MainActor
+func autoMountFailureAlert(_ title: String, _ detail: String) -> AutoMountFailureChoice {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = detail
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "Retry") // .alertFirstButtonReturn
+    alert.addButton(withTitle: "Restart Extension & Retry") // .alertSecondButtonReturn
+    alert.addButton(withTitle: "Dismiss") // .alertThirdButtonReturn
+    NSApplication.shared.activate(ignoringOtherApps: true)
+    switch alert.runModal() {
+    case .alertFirstButtonReturn: return .retry
+    case .alertSecondButtonReturn: return .restartAndRetry
+    default: return .dismiss
+    }
+}
+
 /// A modal error alert with a single OK button (mirrors the old `appkit::show_error`).
 @MainActor
 func showError(_ title: String, _ message: String) {

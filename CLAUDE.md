@@ -315,10 +315,12 @@ untouched **reuses the stored secret** (focusing it clears it to enter a new one
 a *blank* field means an empty secret), so changing other fields never forces a
 re-type. Connections
 persist to `connections.json`; the menu mounts/unmounts them and auto-mounts the
-flagged ones at launch — and for a flagged connection whose secret isn't available
-unattended, the launch flow **prompts** for it (headless mounts run in the
-AppDelegate; the prompt is opened from the always-present menu-bar label, the one
-view that can call `openWindow`).
+flagged ones at launch. The whole launch sequence runs in the always-present menu-bar
+label's `.task` (the one view that can `openWindow`), gated on the extension being
+**ready**: health check → auto-mount the flagged connections → for any that **fail**,
+a modal offering **Retry** / **Restart Extension & Retry** (`killall fskitd`, to clear
+a "Resource busy" stuck instance — see `restart_extension`) → then **prompt** for any
+flagged connection still missing its secret.
 
 There is **no bespoke CLI**: a connection is realised by the system `mount` tool,
 so the SwiftUI app and a plain `mount` do the same thing. Run the app via
@@ -512,7 +514,11 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   shape (`/s3/…`) goes through fine. So the source is always an `FSPathURLResource`
   path (`FSSupportsPathURLs`), never a generic/`s3://` URL. (An Apple bug — a
   framework shouldn't crash on input — but unavoidable from our side.)
-- Nuclear reset for accumulated daemon state: `sudo killall fskitd`.
+- Nuclear reset for accumulated daemon state: `sudo killall fskitd`. The app exposes
+  this as **Restart Extension & Retry** on the auto-mount failure alert
+  (`ffi::restart_extension` → `mounts::restart_fskitd`), elevating via `osascript …
+  with administrator privileges` since fskitd is root (macOS shows its own auth
+  dialog; the app never sees the password).
 
 The **write and read paths are verified end-to-end on a signed build** —
 create/write/mv/rm/truncate against a real bucket via Finder + shell, and the S3
