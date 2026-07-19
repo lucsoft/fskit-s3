@@ -67,8 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isRunningInPreview else { return }
         model.registerLoginItem()
         Task {
-            await model.refresh()
             // Auto-mount the flagged connections, then reflect the new mount state.
+            // (The launch health check + auto-raise lives in the menu-bar label,
+            // which is the always-present view that can call `openWindow`.)
             await Task.detached { _ = autoMountOnLaunch() }.value
             await model.refreshConnections()
         }
@@ -95,7 +96,8 @@ struct FskitS3App: App {
             MenuContent()
                 .environment(delegate.model)
         } label: {
-            Image(systemName: presentation(for: delegate.model.report).barSymbol)
+            MenuBarLabel()
+                .environment(delegate.model)
         }
 
         // The extension-health window, opened from the menu's health row.
@@ -123,6 +125,27 @@ struct FskitS3App: App {
         }
         .windowResizability(.contentSize)
         .windowToolbarStyle(.unified(showsTitle: true))
+    }
+}
+
+/// The menu-bar status glyph. As the one always-present view (the status item shows
+/// at launch, before any window), it also owns the launch-time health check and
+/// raises the health window once if the extension isn't ready — the onboarding nudge
+/// toward the System Settings toggle macOS won't let the app flip itself.
+struct MenuBarLabel: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+    @State private var didLaunchCheck = false
+
+    var body: some View {
+        Image(systemName: presentation(for: model.report).barSymbol)
+            .task {
+                guard !isRunningInPreview, !didLaunchCheck else { return }
+                didLaunchCheck = true
+                await model.refresh()
+                if case .ready = model.report.health { return }
+                activateAndOpen { openWindow(id: HealthWindow.id) }
+            }
     }
 }
 
