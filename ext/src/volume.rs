@@ -174,13 +174,18 @@ define_class!(
         fn getAttributes(
             &self,
             _desired: &FSItemGetAttributesRequest,
-            item: &FSItem,
+            item: Option<&FSItem>,
             reply: &DynBlock<dyn Fn(*mut FSItemAttributes, *mut NSError)>,
         ) {
-            let Some(item) = item.downcast_ref::<S3Item>() else {
+            let Some(item) = as_s3_item(item) else {
+                // FSKit fetches attributes here after a rename, and passes a null
+                // over-item when the destination didn't previously exist (the common
+                // `mv a b` case). There are no attributes for a nonexistent item, so
+                // report ENOENT — an expected filesystem condition FSKit handles
+                // gracefully — rather than EIO (a hard fault) or, as before, crashing.
                 reply.call((
                     ptr::null_mut(),
-                    Retained::as_ptr(&err(libc::EIO)) as *mut NSError,
+                    Retained::as_ptr(&err(libc::ENOENT)) as *mut NSError,
                 ));
                 return;
             };
@@ -195,11 +200,10 @@ define_class!(
         fn lookup(
             &self,
             name: &FSFileName,
-            directory: &FSItem,
+            directory: Option<&FSItem>,
             reply: &DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
         ) {
-            let (Some(dir), Some(name_str)) =
-                (directory.downcast_ref::<S3Item>(), file_name_string(name))
+            let (Some(dir), Some(name_str)) = (as_s3_item(directory), file_name_string(name))
             else {
                 reply.call((
                     ptr::null_mut(),
@@ -246,14 +250,14 @@ define_class!(
         #[unsafe(method(enumerateDirectory:startingAtCookie:verifier:providingAttributes:usingPacker:replyHandler:))]
         fn enumerate(
             &self,
-            directory: &FSItem,
+            directory: Option<&FSItem>,
             cookie: FSDirectoryCookie,
             verifier: FSDirectoryVerifier,
             _attributes: *mut FSItemGetAttributesRequest,
             packer: &FSDirectoryEntryPacker,
             reply: &DynBlock<dyn Fn(FSDirectoryVerifier, *mut NSError)>,
         ) {
-            let Some(dir) = directory.downcast_ref::<S3Item>() else {
+            let Some(dir) = as_s3_item(directory) else {
                 reply.call((verifier, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
                 return;
             };
@@ -303,11 +307,10 @@ define_class!(
         fn setAttributes(
             &self,
             attrs: &FSItemSetAttributesRequest,
-            item: &FSItem,
+            item: Option<&FSItem>,
             reply: &DynBlock<dyn Fn(*mut FSItemAttributes, *mut NSError)>,
         ) {
-            let (Some(item), Some(backend)) = (item.downcast_ref::<S3Item>(), self.backend())
-            else {
+            let (Some(item), Some(backend)) = (as_s3_item(item), self.backend()) else {
                 reply.call((
                     ptr::null_mut(),
                     Retained::as_ptr(&err(libc::EIO)) as *mut NSError,
@@ -354,12 +357,12 @@ define_class!(
             &self,
             name: &FSFileName,
             item_type: FSItemType,
-            directory: &FSItem,
+            directory: Option<&FSItem>,
             _attributes: &FSItemSetAttributesRequest,
             reply: &DynBlock<dyn Fn(*mut FSItem, *mut FSFileName, *mut NSError)>,
         ) {
             let (Some(dir), Some(name_str), Some(backend)) = (
-                directory.downcast_ref::<S3Item>(),
+                as_s3_item(directory),
                 file_name_string(name),
                 self.backend(),
             ) else {
@@ -439,13 +442,12 @@ define_class!(
         #[unsafe(method(removeItem:named:fromDirectory:replyHandler:))]
         fn removeItem(
             &self,
-            item: &FSItem,
+            item: Option<&FSItem>,
             _name: &FSFileName,
             _directory: &FSItem,
             reply: &DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            let (Some(item), Some(backend)) = (item.downcast_ref::<S3Item>(), self.backend())
-            else {
+            let (Some(item), Some(backend)) = (as_s3_item(item), self.backend()) else {
                 reply.call((Retained::as_ptr(&err(libc::EIO)) as *mut NSError,));
                 return;
             };
@@ -464,17 +466,17 @@ define_class!(
         #[allow(clippy::too_many_arguments)]
         fn renameItem(
             &self,
-            item: &FSItem,
+            item: Option<&FSItem>,
             _source_directory: &FSItem,
             _source_name: &FSFileName,
             destination_name: &FSFileName,
-            destination_directory: &FSItem,
+            destination_directory: Option<&FSItem>,
             _over_item: *mut FSItem,
             reply: &DynBlock<dyn Fn(*mut FSFileName, *mut NSError)>,
         ) {
             let (Some(item), Some(dest_dir), Some(dest_name), Some(backend)) = (
-                item.downcast_ref::<S3Item>(),
-                destination_directory.downcast_ref::<S3Item>(),
+                as_s3_item(item),
+                as_s3_item(destination_directory),
                 file_name_string(destination_name),
                 self.backend(),
             ) else {
@@ -502,13 +504,13 @@ define_class!(
         #[unsafe(method(readFromFile:offset:length:intoBuffer:replyHandler:))]
         fn read(
             &self,
-            item: &FSItem,
+            item: Option<&FSItem>,
             offset: i64,
             length: usize,
             buffer: &FSMutableFileDataBuffer,
             reply: &DynBlock<dyn Fn(usize, *mut NSError)>,
         ) {
-            let Some(item) = item.downcast_ref::<S3Item>() else {
+            let Some(item) = as_s3_item(item) else {
                 reply.call((0, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
                 return;
             };
@@ -543,12 +545,11 @@ define_class!(
         fn write(
             &self,
             contents: &NSData,
-            item: &FSItem,
+            item: Option<&FSItem>,
             offset: i64,
             reply: &DynBlock<dyn Fn(usize, *mut NSError)>,
         ) {
-            let (Some(item), Some(backend)) = (item.downcast_ref::<S3Item>(), self.backend())
-            else {
+            let (Some(item), Some(backend)) = (as_s3_item(item), self.backend()) else {
                 reply.call((0, Retained::as_ptr(&err(libc::EIO)) as *mut NSError));
                 return;
             };
@@ -688,6 +689,20 @@ fn timespec_of(t: std::time::SystemTime) -> Timespec {
         tv_sec: d.as_secs() as i64,
         tv_nsec: d.subsec_nanos() as i64,
     }
+}
+
+/// Resolve a possibly-null `FSItem` callback argument to our concrete `S3Item`.
+///
+/// FSKit can hand a **null** item to a callback: after a rename it fetches the
+/// item's attributes (`getStandardItemAttributesForItem:`) and passes a null
+/// over-item when the destination didn't previously exist — the common case. objc2
+/// binds that null to a `&FSItem`, and the first message sent to it (as
+/// `downcast_ref` does, via `isKindOfClass:`) aborts the whole extension through
+/// `panic_null`. So every callback takes its item as `Option<&FSItem>` and funnels
+/// it through here; a null pointer (or an object that isn't one of ours) becomes
+/// `None` — the caller replies a POSIX error instead of crashing.
+fn as_s3_item(item: Option<&FSItem>) -> Option<&S3Item> {
+    item?.downcast_ref::<S3Item>()
 }
 
 /// Read an `FSFileName` as a UTF-8 string.
