@@ -90,13 +90,21 @@ rationale.
 cargo test          # core + backend, against OpenDAL's in-memory service
 ```
 
-Against a real S3 endpoint (local RustFS via `compose.yaml`):
+The `#[ignore]`d live integration tests in `backend/tests/live_s3.rs` exercise
+the write path against a real S3 endpoint — a full file lifecycle (create →
+update → update → check stats + modified → delete), mtime stability, and
+server-side rename. They default to the local RustFS from `compose.yaml`:
 
 ```sh
 docker compose up -d                                                 # local S3 on :9000
-RUSTFS_ENDPOINT=http://localhost:9000 cargo test -p fskit-s3-backend -- --ignored
+RUSTFS_ENDPOINT=http://localhost:9000 \
+  cargo test -p fskit-s3-backend --test live_s3 -- --ignored --nocapture
 docker compose down                                                  # add -v to wipe data
 ```
+
+Point them at any other S3 (real AWS, MinIO, R2, …) by setting `RUSTFS_ENDPOINT`
+to its URL and overriding the `FSKIT_S3_BUCKET` / `FSKIT_S3_REGION` /
+`FSKIT_S3_ACCESS_KEY_ID` / `FSKIT_S3_SECRET_ACCESS_KEY` env vars.
 
 ## TODO
 

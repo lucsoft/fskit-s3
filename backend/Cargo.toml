@@ -15,13 +15,20 @@ opendal = { version = "0.54", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# Naming `StorageBackend`/`EntryKind`/`StorageError` from the external
+# integration test crate (`tests/live_s3.rs`), which sees only public API and so
+# can't reach these through the backend's own `use`s.
+fskit-s3-core = { workspace = true }
 # The in-memory service backs the adapter tests: real OpenDAL list/stat/read
 # semantics, no live bucket.
 opendal = { version = "0.54", default-features = false, features = [
     "services-s3",
     "services-memory",
 ] }
-tokio = { version = "1", features = ["rt", "macros"] }
+# `rt`/`macros` for `#[tokio::test]`; `time` for the `sleep` the live tests use to
+# space writes past S3's 1-second Last-Modified granularity when asserting mtime
+# advances.
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 # Only to construct an `opendal::Metadata` with a known last-modified time when
 # unit-testing the time conversion (the memory service reports none). `std` gives
 # `DateTime::from_timestamp`; no wall clock needed, so no `clock` feature.

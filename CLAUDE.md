@@ -112,9 +112,19 @@ prefix).
   `RwLock`, since the trait's mutating ops take `&self`) with object-store
   semantics; read-write test fixture + no-credential demo mount (feature `mem`).
 - **`backend/src/lib.rs`** — `OpenDalBackend`: `StorageBackend` over any OpenDAL
-  `Operator`; `S3Config` + `::s3()` constructor. Tested against OpenDAL's
-  in-memory service; an ignored `live_s3_roundtrip` test runs against the
-  `compose.yaml` RustFS.
+  `Operator`; `S3Config` + `::s3()` constructor (which wraps the operator in a
+  `RetryLayer` so *transient* S3 errors — 503 SlowDown, 500, dropped keep-alives
+  under the parallel load a filesystem generates — are retried transparently
+  instead of surfacing to apps; persistent errors like auth/not-found still fail
+  fast). Tested against OpenDAL's
+  in-memory service. **`backend/tests/live_s3.rs`** — `#[ignore]`d integration
+  tests against a real endpoint (the `compose.yaml` RustFS by default,
+  overridable via `FSKIT_S3_*`): a full file lifecycle (create → update → update
+  → check stats + modified → delete), that the reported mtime advances on a write
+  but is *stable* across stats of an untouched file (the editor "changed since
+  reading" property), and S3's server-side-copy `rename`. They gate on
+  `RUSTFS_ENDPOINT` and use unique per-run key prefixes, so they self-skip without
+  it and never depend on seeded bucket state (real use churns it).
 - **`ext/`** — the FSKit extension, in Rust (`staticlib`). `sys.rs`:
   hand-written `objc2` bindings for FSKit classes + the three volume protocols.
   `item.rs`: `FSKitS3Item` (`FSItem` subclass carrying the path). `volume.rs`:

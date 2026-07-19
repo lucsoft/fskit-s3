@@ -24,6 +24,7 @@
 )]
 
 use fskit_s3_core::{async_trait, path, Entry, EntryKind, StorageBackend, StorageError};
+use opendal::layers::RetryLayer;
 use opendal::{EntryMode, ErrorKind, Operator};
 
 /// Connection details for an S3 (or S3-compatible) bucket.
@@ -67,7 +68,19 @@ impl OpenDalBackend {
         if let Some(token) = &cfg.session_token {
             builder = builder.session_token(token);
         }
-        let op = Operator::new(builder).map_err(map_err)?.finish();
+        // Retry transient failures transparently. A network filesystem issues
+        // many parallel ops (Finder alone fans out), and any real S3 endpoint
+        // returns the occasional retryable error under load — 503 SlowDown, 500,
+        // a dropped keep-alive connection. Those must not surface to apps as hard
+        // failures. `RetryLayer` retries only errors OpenDAL marks `is_temporary`,
+        // so persistent ones (auth, not-found) still propagate immediately; the
+        // jitter avoids a synchronized retry storm across concurrent operations.
+        // (Surfaced by the live integration tests, which flaked ~1-in-3 without it
+        // when their three cases hit RustFS in parallel.)
+        let op = Operator::new(builder)
+            .map_err(map_err)?
+            .finish()
+            .layer(RetryLayer::new().with_jitter());
         Ok(OpenDalBackend { op })
     }
 }
@@ -562,73 +575,6 @@ mod tests {
 
         assert!(matches!(
             b.rename("/missing", "/x").await,
-            Err(StorageError::NotFound)
-        ));
-    }
-
-    /// End-to-end against a live S3 endpoint (the `compose.yaml` RustFS). Ignored
-    /// by default so CI stays hermetic; run it with:
-    ///
-    /// ```sh
-    /// docker compose up -d
-    /// RUSTFS_ENDPOINT=http://localhost:9000 cargo test -p fskit-s3-backend -- --ignored
-    /// ```
-    #[tokio::test]
-    #[ignore = "requires `docker compose up`; set RUSTFS_ENDPOINT and run with --ignored"]
-    async fn live_s3_roundtrip() {
-        let Ok(endpoint) = std::env::var("RUSTFS_ENDPOINT") else {
-            eprintln!("RUSTFS_ENDPOINT unset; skipping live test");
-            return;
-        };
-        let cfg = S3Config {
-            bucket: "test-bucket".into(),
-            region: "us-east-1".into(),
-            endpoint,
-            access_key_id: "fskit".into(),
-            secret_access_key: "fskit-secret".into(),
-            session_token: None,
-        };
-        let backend = OpenDalBackend::s3(&cfg).expect("build s3 backend");
-
-        // compose seeds test-bucket/hello.txt = "hello from rustfs\n".
-        let root = backend.list("/").await.expect("list root");
-        assert!(root.iter().any(|e| e.name == "hello.txt"), "root: {root:?}");
-        let hello = backend.stat("/hello.txt").await.expect("stat");
-        assert_eq!(hello.size, 18);
-        // Real S3 reports a last-modified time; the ext maps it to a stable mtime.
-        assert!(
-            hello.modified.is_some(),
-            "S3 stat should carry a modified time"
-        );
-        assert_eq!(
-            backend.read("/hello.txt", 0, 1024).await.expect("read"),
-            b"hello from rustfs\n"
-        );
-
-        // Write path: create → write → truncate → rename → read → remove, on a
-        // scratch key so the test leaves the bucket as it found it.
-        backend
-            .create("/scratch.txt", EntryKind::File)
-            .await
-            .unwrap();
-        backend.write("/scratch.txt", 0, b"hello").await.unwrap();
-        backend.write("/scratch.txt", 5, b" there!").await.unwrap();
-        assert_eq!(backend.stat("/scratch.txt").await.unwrap().size, 12);
-        backend.truncate("/scratch.txt", 5).await.unwrap();
-        backend
-            .rename("/scratch.txt", "/scratch2.txt")
-            .await
-            .unwrap();
-        assert_eq!(
-            backend.read("/scratch2.txt", 0, 1024).await.unwrap(),
-            b"hello"
-        );
-        backend
-            .remove("/scratch2.txt", EntryKind::File)
-            .await
-            .unwrap();
-        assert!(matches!(
-            backend.stat("/scratch2.txt").await,
             Err(StorageError::NotFound)
         ));
     }
