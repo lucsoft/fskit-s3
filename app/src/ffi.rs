@@ -386,8 +386,17 @@ pub struct AutoMountFailure {
 #[uniffi::export]
 pub fn auto_mount_on_launch() -> Vec<AutoMountFailure> {
     let mut failed = Vec::new();
+    // Snapshot the live fskit mounts once so a connection already mounted at its
+    // mount point (e.g. survived the last quit, or was mounted by hand) is skipped
+    // rather than re-mounted — a second `mount` on the same point fails.
+    let mounted = mounts::list_fskit();
     for conn in Registry::load().list() {
         if !conn.mount_on_launch {
+            continue;
+        }
+        let mount_point = conn.mount_point();
+        let mount_point = mount_point.to_string_lossy();
+        if mounted.iter().any(|m| m.mount_point == *mount_point) {
             continue;
         }
         let secret = if conn.is_s3() {
