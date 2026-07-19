@@ -312,9 +312,10 @@ RustBuffer uniffi_fskit_s3_app_fn_func_mount_point_for(RustBuffer name, RustCall
 void uniffi_fskit_s3_app_fn_func_mount_with_secret(RustBuffer name, RustBuffer secret, int8_t save_to_keychain, int8_t save_to_disk, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_READ_SECRET
-#define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_READ_SECRET
-RustBuffer uniffi_fskit_s3_app_fn_func_read_secret(RustBuffer name, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_PENDING_SECRET_MOUNTS_ON_LAUNCH
+#define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_PENDING_SECRET_MOUNTS_ON_LAUNCH
+RustBuffer uniffi_fskit_s3_app_fn_func_pending_secret_mounts_on_launch(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_SAVE_CONNECTION
@@ -689,9 +690,9 @@ uint16_t uniffi_fskit_s3_app_checksum_func_mount_with_secret(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_CHECKSUM_FUNC_READ_SECRET
-#define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_CHECKSUM_FUNC_READ_SECRET
-uint16_t uniffi_fskit_s3_app_checksum_func_read_secret(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_CHECKSUM_FUNC_PENDING_SECRET_MOUNTS_ON_LAUNCH
+#define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_CHECKSUM_FUNC_PENDING_SECRET_MOUNTS_ON_LAUNCH
+uint16_t uniffi_fskit_s3_app_checksum_func_pending_secret_mounts_on_launch(void
     
 );
 #endif

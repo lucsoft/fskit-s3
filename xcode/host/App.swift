@@ -71,10 +71,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // (The launch health check + auto-raise lives in the menu-bar label,
             // which is the always-present view that can call `openWindow`.)
             let failed = await Task.detached { autoMountOnLaunch() }.value
-            if !failed.isEmpty {
-                // Auto-mount is best-effort and can't prompt; log the misses so a
-                // silent launch failure is at least visible in Console / `log stream`.
-                NSLog("fskit-s3: auto-mount failed for: \(failed.joined(separator: ", "))")
+            // Auto-mount is best-effort and can't prompt; log each miss *with its
+            // reason* so a silent launch failure is diagnosable in Console / `log stream`.
+            for failure in failed {
+                NSLog("fskit-s3: auto-mount failed for \(failure.connection): \(failure.reason)")
             }
             await model.refreshConnections()
         }
@@ -148,8 +148,20 @@ struct MenuBarLabel: View {
                 guard !isRunningInPreview, !didLaunchCheck else { return }
                 didLaunchCheck = true
                 await model.refresh()
-                if case .ready = model.report.health { return }
-                activateAndOpen { openWindow(id: HealthWindow.id) }
+                guard case .ready = model.report.health else {
+                    // Not ready: nudge toward the System Settings toggle and don't
+                    // bother prompting for secrets (a mount can't succeed yet anyway).
+                    activateAndOpen { openWindow(id: HealthWindow.id) }
+                    return
+                }
+                // Ready: the headless auto-mount (in the AppDelegate) handled the
+                // connections whose secret is available; prompt for any launch-flagged
+                // one still missing its secret, so "mount when launching" completes
+                // with the user typing the password.
+                let pending = await Task.detached { pendingSecretMountsOnLaunch() }.value
+                for name in pending {
+                    activateAndOpen { openWindow(value: SecretPromptRequest(name: name)) }
+                }
             }
     }
 }

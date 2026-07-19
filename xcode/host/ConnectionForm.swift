@@ -29,12 +29,31 @@ struct ConnectionFormView: View {
     @State private var saveToKeychain = false
     @State private var saveToDisk = false
     @State private var mountOnLaunch = false
+    /// The custom mount folder (empty ⇒ the default `~/fskit-s3/<name>`). Chosen via
+    /// an open panel; editable on create and edit.
+    @State private var mountPoint = ""
+    @FocusState private var secretFocused: Bool
+
+    /// A non-typable placeholder loaded into the Secret field when a stored secret
+    /// exists (it renders as dots, signalling "a password is set" without the secret
+    /// ever crossing back from Rust). Leaving it untouched keeps the stored secret;
+    /// focusing the field clears it so the user starts fresh — a *blank* field then
+    /// means an empty secret, not "keep". Chosen so a real secret can't equal it.
+    private let storedSecretMarker = "\u{2063}\u{2063}fskit-s3.stored-secret\u{2063}\u{2063}"
+
+    /// Whether the Secret field still holds the untouched stored-secret placeholder.
+    private var keepsStoredSecret: Bool { secret == storedSecretMarker }
 
     @State private var status = ""
     @State private var busy = false
     @State private var loaded = false
 
     private var isEditing: Bool { request.originalName != nil }
+
+    /// What the default mount folder will be, given the name typed so far.
+    private var defaultMountHint: String {
+        "~/fskit-s3/\(name.isEmpty ? "<name>" : name)"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,7 +74,14 @@ struct ConnectionFormView: View {
                         TextField("Bucket", text: $bucket, prompt: Text("Required"))
                         TextField("Region", text: $region, prompt: Text("us-east-1"))
                         TextField("Access Key ID", text: $accessKeyId, prompt: Text("Required"))
-                        SecureField("Secret", text: $secret, prompt: Text("Required"))
+                        SecureField("Secret", text: $secret,
+                                    prompt: Text(isEditing ? "New secret (blank = none)" : "Required"))
+                            .focused($secretFocused)
+                            .onChange(of: secretFocused) { _, focused in
+                                // Focusing the placeholder clears it, so the user types a
+                                // fresh secret; leaving it unfocused keeps the stored one.
+                                if focused && keepsStoredSecret { secret = "" }
+                            }
                         TextField("Session token", text: $sessionToken, prompt: Text("Optional"))
                         Toggle("Save secret to Keychain", isOn: $saveToKeychain)
                         Toggle(isOn: $saveToDisk) {
@@ -67,6 +93,28 @@ struct ConnectionFormView: View {
 
                 Section {
                     Toggle("Mount when launching", isOn: $mountOnLaunch)
+                }
+
+                // The mount folder — pick an empty folder to mount into, or leave it for
+                // the default. Editable on create and edit alike (Open in Finder lives
+                // in the menu bar, not here).
+                Section {
+                    LabeledContent("Mount folder") {
+                        HStack {
+                            Text(mountPoint.isEmpty ? defaultMountHint : mountPoint)
+                                .foregroundStyle(mountPoint.isEmpty ? .secondary : .primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            if !mountPoint.isEmpty {
+                                Button("Default") { mountPoint = "" }
+                            }
+                            Button("Choose…") {
+                                if let picked = chooseMountFolder() { mountPoint = picked }
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("Pick an empty folder, or leave it to use \(defaultMountHint).")
                 }
 
                 if !status.isEmpty {
@@ -119,6 +167,8 @@ struct ConnectionFormView: View {
         saveToKeychain = connection.saveSecretToKeychain
         saveToDisk = connection.saveSecretToDisk
         mountOnLaunch = connection.mountOnLaunch
+        // The raw stored value (empty ⇒ default), so saving an unchanged folder keeps it.
+        mountPoint = connection.mountPoint ?? ""
         if case .s3(let meta) = connection.kind {
             isS3 = true
             endpoint = meta.endpoint
@@ -127,15 +177,22 @@ struct ConnectionFormView: View {
             accessKeyId = meta.accessKeyId
             sessionToken = meta.sessionToken ?? ""
         }
-        secret = await Task.detached { readSecret(name: original) }.value ?? ""
+        // The secret never crosses back to Swift. If one is stored, load the dots
+        // placeholder so the field shows a secret exists; leaving it untouched keeps it.
+        if await Task.detached(operation: { hasSecret(name: original) }).value {
+            secret = storedSecretMarker
+        }
     }
 
     private func currentForm() -> FormInput {
-        FormInput(
+        // Untouched placeholder ⇒ keep the stored secret; never send the marker itself.
+        let keep = keepsStoredSecret
+        return FormInput(
             name: name, isS3: isS3, endpoint: endpoint, bucket: bucket, region: region,
-            accessKeyId: accessKeyId, secret: secret, sessionToken: sessionToken,
+            accessKeyId: accessKeyId, secret: keep ? "" : secret, sessionToken: sessionToken,
+            keepStoredSecret: keep,
             saveSecretToKeychain: saveToKeychain, saveSecretToDisk: saveToDisk,
-            mountOnLaunch: mountOnLaunch)
+            mountOnLaunch: mountOnLaunch, mountPoint: mountPoint)
     }
 
     private func save() {

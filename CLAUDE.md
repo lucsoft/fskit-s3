@@ -165,7 +165,11 @@ prefix).
     model + the persisted `Registry` (`~/Library/Application Support/fskit-s3/
     connections.json`, which **never holds a secret**). `source_path()` emits the
     self-describing mount source (`/memory` or `/s3/<name>?bucket=..&..`); config
-    fields must avoid the query delimiters `?&=#` (validated in `from_form`).
+    fields must avoid the query delimiters `?&=#` (validated in `from_form`). The
+    **mount point** is separate from the source: `mount_point()` returns the user's
+    chosen folder (`Connection.mount_point`, picked at creation and required to be an
+    *empty* directory — checked in `save_connection`) or the default
+    `~/fskit-s3/<name>`.
   - `keychain.rs` — the S3 secret in the Keychain (`security-framework`),
     preferring a **shared access group** the extension can read (falls back to the
     default keychain when unsigned).
@@ -201,7 +205,10 @@ prefix).
     `#[derive(uniffi::Record/Enum/Error)]` on the app-layer types — the whole surface
     the SwiftUI app calls (health, connection CRUD + form validation, Keychain,
     mounting, the S3 test). Presentation (SF Symbols, colours, windows) stays on the
-    Swift side; the secret only ever crosses back to pre-fill the edit form.
+    Swift side; the secret **never crosses back to Swift** — the edit form only learns
+    *whether* one is stored (`has_secret`) and shows a dots placeholder; leaving it
+    untouched sets `keep_stored_secret`, and `save_connection` reuses the stored secret
+    (a *blank* field instead means an empty secret).
   - `lib.rs` — just the module list + `uniffi::setup_scaffolding!()`. `health`/
     `autostart` keep a small objc2 FFI (FSClient / SMAppService, looked up via
     `class!`); there is no AppKit UI in Rust any more.
@@ -287,9 +294,20 @@ entitlement generally needs a paid Apple Developer Program membership.
 `fskit-s3-app` is a ☁ SwiftUI menu-bar app. **New Connection…** opens a form (a
 grouped `Form` in a Liquid-Glass window) to create a connection — **In-memory** (the
 demo) or **S3** (endpoint/bucket/region/access-key + secret) — with *Save to
-Keychain*, *Mount when launching*, and *Test & Save* (validates S3 credentials by
-listing the bucket, off the main actor). Connections persist to `connections.json`;
-the menu mounts/unmounts them and auto-mounts the flagged ones at launch.
+Keychain*, *Mount when launching*, a **Mount folder** picker (choose an empty folder,
+or leave it for the default `~/fskit-s3/<name>`), and *Test & Save* (validates S3
+credentials by listing the bucket, off the main actor). The mount folder is editable
+on **edit** too (the folder is re-validated as empty only when it changed); each
+connection's **menu** shows its mount path with an **Open in Finder** item. When
+editing, the Secret field shows a **dots placeholder** if one is stored; leaving it
+untouched **reuses the stored secret** (focusing it clears it to enter a new one, and
+a *blank* field means an empty secret), so changing other fields never forces a
+re-type. Connections
+persist to `connections.json`; the menu mounts/unmounts them and auto-mounts the
+flagged ones at launch — and for a flagged connection whose secret isn't available
+unattended, the launch flow **prompts** for it (headless mounts run in the
+AppDelegate; the prompt is opened from the always-present menu-bar label, the one
+view that can call `openWindow`).
 
 There is **no bespoke CLI**: a connection is realised by the system `mount` tool,
 so the SwiftUI app and a plain `mount` do the same thing. Run the app via

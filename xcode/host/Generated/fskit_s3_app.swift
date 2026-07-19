@@ -463,6 +463,76 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 /**
+ * A connection that failed to auto-mount at launch, with the reason — so the log
+ * (and any future UI) shows *why*, not just which one.
+ */
+public struct AutoMountFailure {
+    public var connection: String
+    public var reason: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(connection: String, reason: String) {
+        self.connection = connection
+        self.reason = reason
+    }
+}
+
+
+
+extension AutoMountFailure: Equatable, Hashable {
+    public static func ==(lhs: AutoMountFailure, rhs: AutoMountFailure) -> Bool {
+        if lhs.connection != rhs.connection {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(connection)
+        hasher.combine(reason)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAutoMountFailure: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AutoMountFailure {
+        return
+            try AutoMountFailure(
+                connection: FfiConverterString.read(from: &buf), 
+                reason: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AutoMountFailure, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.connection, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutoMountFailure_lift(_ buf: RustBuffer) throws -> AutoMountFailure {
+    return try FfiConverterTypeAutoMountFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAutoMountFailure_lower(_ value: AutoMountFailure) -> RustBuffer {
+    return FfiConverterTypeAutoMountFailure.lower(value)
+}
+
+
+/**
  * A configured storage connection: an identity, the backend it maps to, and how
  * it should be mounted.
  */
@@ -486,6 +556,12 @@ public struct Connection {
      * Mount this connection automatically when the app launches.
      */
     public var mountOnLaunch: Bool
+    /**
+     * A custom mount point (an empty folder the user picked at creation). `None`
+     * (or empty) ⇒ the default `~/fskit-s3/<name>`. Resolved via
+     * [`Connection::mount_point`].
+     */
+    public var mountPoint: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -503,12 +579,18 @@ public struct Connection {
          */saveSecretToDisk: Bool, 
         /**
          * Mount this connection automatically when the app launches.
-         */mountOnLaunch: Bool) {
+         */mountOnLaunch: Bool, 
+        /**
+         * A custom mount point (an empty folder the user picked at creation). `None`
+         * (or empty) ⇒ the default `~/fskit-s3/<name>`. Resolved via
+         * [`Connection::mount_point`].
+         */mountPoint: String?) {
         self.name = name
         self.kind = kind
         self.saveSecretToKeychain = saveSecretToKeychain
         self.saveSecretToDisk = saveSecretToDisk
         self.mountOnLaunch = mountOnLaunch
+        self.mountPoint = mountPoint
     }
 }
 
@@ -531,6 +613,9 @@ extension Connection: Equatable, Hashable {
         if lhs.mountOnLaunch != rhs.mountOnLaunch {
             return false
         }
+        if lhs.mountPoint != rhs.mountPoint {
+            return false
+        }
         return true
     }
 
@@ -540,6 +625,7 @@ extension Connection: Equatable, Hashable {
         hasher.combine(saveSecretToKeychain)
         hasher.combine(saveSecretToDisk)
         hasher.combine(mountOnLaunch)
+        hasher.combine(mountPoint)
     }
 }
 
@@ -555,7 +641,8 @@ public struct FfiConverterTypeConnection: FfiConverterRustBuffer {
                 kind: FfiConverterTypeConnectionKind.read(from: &buf), 
                 saveSecretToKeychain: FfiConverterBool.read(from: &buf), 
                 saveSecretToDisk: FfiConverterBool.read(from: &buf), 
-                mountOnLaunch: FfiConverterBool.read(from: &buf)
+                mountOnLaunch: FfiConverterBool.read(from: &buf), 
+                mountPoint: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -565,6 +652,7 @@ public struct FfiConverterTypeConnection: FfiConverterRustBuffer {
         FfiConverterBool.write(value.saveSecretToKeychain, into: &buf)
         FfiConverterBool.write(value.saveSecretToDisk, into: &buf)
         FfiConverterBool.write(value.mountOnLaunch, into: &buf)
+        FfiConverterOptionString.write(value.mountPoint, into: &buf)
     }
 }
 
@@ -596,6 +684,12 @@ public struct FormInput {
     public var accessKeyId: String
     public var secret: String
     public var sessionToken: String
+    /**
+     * On edit, keep the already-stored secret instead of using `secret` — set when
+     * the form's Secret field was left as its "a secret exists" placeholder (see
+     * `save_connection`). A *blank* `secret` is not this: it means an empty secret.
+     */
+    public var keepStoredSecret: Bool
     public var saveSecretToKeychain: Bool
     /**
      * Store the secret as a dev-only plaintext file on disk (see
@@ -603,14 +697,28 @@ public struct FormInput {
      */
     public var saveSecretToDisk: Bool
     public var mountOnLaunch: Bool
+    /**
+     * A custom mount folder; empty ⇒ the default `~/fskit-s3/<name>` (see
+     * [`Connection::mount_point`]).
+     */
+    public var mountPoint: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String, isS3: Bool, endpoint: String, bucket: String, region: String, accessKeyId: String, secret: String, sessionToken: String, saveSecretToKeychain: Bool, 
+    public init(name: String, isS3: Bool, endpoint: String, bucket: String, region: String, accessKeyId: String, secret: String, sessionToken: String, 
+        /**
+         * On edit, keep the already-stored secret instead of using `secret` — set when
+         * the form's Secret field was left as its "a secret exists" placeholder (see
+         * `save_connection`). A *blank* `secret` is not this: it means an empty secret.
+         */keepStoredSecret: Bool, saveSecretToKeychain: Bool, 
         /**
          * Store the secret as a dev-only plaintext file on disk (see
          * [`Connection::save_secret_to_disk`]). Insecure; for unsigned builds.
-         */saveSecretToDisk: Bool, mountOnLaunch: Bool) {
+         */saveSecretToDisk: Bool, mountOnLaunch: Bool, 
+        /**
+         * A custom mount folder; empty ⇒ the default `~/fskit-s3/<name>` (see
+         * [`Connection::mount_point`]).
+         */mountPoint: String) {
         self.name = name
         self.isS3 = isS3
         self.endpoint = endpoint
@@ -619,9 +727,11 @@ public struct FormInput {
         self.accessKeyId = accessKeyId
         self.secret = secret
         self.sessionToken = sessionToken
+        self.keepStoredSecret = keepStoredSecret
         self.saveSecretToKeychain = saveSecretToKeychain
         self.saveSecretToDisk = saveSecretToDisk
         self.mountOnLaunch = mountOnLaunch
+        self.mountPoint = mountPoint
     }
 }
 
@@ -653,6 +763,9 @@ extension FormInput: Equatable, Hashable {
         if lhs.sessionToken != rhs.sessionToken {
             return false
         }
+        if lhs.keepStoredSecret != rhs.keepStoredSecret {
+            return false
+        }
         if lhs.saveSecretToKeychain != rhs.saveSecretToKeychain {
             return false
         }
@@ -660,6 +773,9 @@ extension FormInput: Equatable, Hashable {
             return false
         }
         if lhs.mountOnLaunch != rhs.mountOnLaunch {
+            return false
+        }
+        if lhs.mountPoint != rhs.mountPoint {
             return false
         }
         return true
@@ -674,9 +790,11 @@ extension FormInput: Equatable, Hashable {
         hasher.combine(accessKeyId)
         hasher.combine(secret)
         hasher.combine(sessionToken)
+        hasher.combine(keepStoredSecret)
         hasher.combine(saveSecretToKeychain)
         hasher.combine(saveSecretToDisk)
         hasher.combine(mountOnLaunch)
+        hasher.combine(mountPoint)
     }
 }
 
@@ -696,9 +814,11 @@ public struct FfiConverterTypeFormInput: FfiConverterRustBuffer {
                 accessKeyId: FfiConverterString.read(from: &buf), 
                 secret: FfiConverterString.read(from: &buf), 
                 sessionToken: FfiConverterString.read(from: &buf), 
+                keepStoredSecret: FfiConverterBool.read(from: &buf), 
                 saveSecretToKeychain: FfiConverterBool.read(from: &buf), 
                 saveSecretToDisk: FfiConverterBool.read(from: &buf), 
-                mountOnLaunch: FfiConverterBool.read(from: &buf)
+                mountOnLaunch: FfiConverterBool.read(from: &buf), 
+                mountPoint: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -711,9 +831,11 @@ public struct FfiConverterTypeFormInput: FfiConverterRustBuffer {
         FfiConverterString.write(value.accessKeyId, into: &buf)
         FfiConverterString.write(value.secret, into: &buf)
         FfiConverterString.write(value.sessionToken, into: &buf)
+        FfiConverterBool.write(value.keepStoredSecret, into: &buf)
         FfiConverterBool.write(value.saveSecretToKeychain, into: &buf)
         FfiConverterBool.write(value.saveSecretToDisk, into: &buf)
         FfiConverterBool.write(value.mountOnLaunch, into: &buf)
+        FfiConverterString.write(value.mountPoint, into: &buf)
     }
 }
 
@@ -1470,6 +1592,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAutoMountFailure: FfiConverterRustBuffer {
+    typealias SwiftType = [AutoMountFailure]
+
+    public static func write(_ value: [AutoMountFailure], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAutoMountFailure.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AutoMountFailure] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AutoMountFailure]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAutoMountFailure.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeConnection: FfiConverterRustBuffer {
     typealias SwiftType = [Connection]
 
@@ -1519,10 +1666,11 @@ fileprivate struct FfiConverterSequenceTypeMount: FfiConverterRustBuffer {
 /**
  * Mount every connection flagged `mount_on_launch` whose secret is available
  * (S3 connections without a stored secret are skipped — a prompt can't run
- * unattended at launch). Best-effort; returns the names that failed, for logging.
+ * unattended at launch). Best-effort; returns the connections that failed **with the
+ * mount error**, for logging.
  */
-public func autoMountOnLaunch() -> [String] {
-    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+public func autoMountOnLaunch() -> [AutoMountFailure] {
+    return try!  FfiConverterSequenceTypeAutoMountFailure.lift(try! rustCall() {
     uniffi_fskit_s3_app_fn_func_auto_mount_on_launch($0
     )
 })
@@ -1614,8 +1762,11 @@ public func mountConnection(name: String)throws  {try rustCallWithError(FfiConve
 }
 }
 /**
- * The default mount point (`~/fskit-s3/<name>`) for a connection name. The menu
- * joins this against [`list_fskit_mounts`] to show a green/grey "mounted" dot.
+ * The mount point for a connection — its custom folder if set, else the default
+ * `~/fskit-s3/<name>`. The menu joins this against [`list_fskit_mounts`] to show a
+ * green/grey "mounted" dot, and unmount targets it, so it must match what
+ * [`mount_connection`] actually mounts. Falls back to the default for an unknown
+ * name.
  */
 public func mountPointFor(name: String) -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
@@ -1641,14 +1792,15 @@ public func mountWithSecret(name: String, secret: String, saveToKeychain: Bool, 
 }
 }
 /**
- * The stored secret for a connection, if any (Keychain first, then the dev on-disk
- * file) — only to pre-fill the edit form so an S3 connection needn't have its secret
- * re-typed. Never persisted by Swift.
+ * The launch-flagged S3 connections whose secret **isn't** available for an
+ * unattended mount — the ones [`auto_mount_on_launch`] had to skip. The UI opens a
+ * secret prompt for each so "mount when launching" still mounts (with the user
+ * typing the password) instead of silently doing nothing. Memory connections and
+ * those with a usable secret are omitted (they auto-mount headlessly).
  */
-public func readSecret(name: String) -> String? {
-    return try!  FfiConverterOptionString.lift(try! rustCall() {
-    uniffi_fskit_s3_app_fn_func_read_secret(
-        FfiConverterString.lower(name),$0
+public func pendingSecretMountsOnLaunch() -> [String] {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+    uniffi_fskit_s3_app_fn_func_pending_secret_mounts_on_launch($0
     )
 })
 }
@@ -1726,7 +1878,7 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_fskit_s3_app_checksum_func_auto_mount_on_launch() != 42565) {
+    if (uniffi_fskit_s3_app_checksum_func_auto_mount_on_launch() != 3746) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_fskit_s3_app_checksum_func_autostart_status() != 63249) {
@@ -1753,13 +1905,13 @@ private var initializationResult: InitializationResult = {
     if (uniffi_fskit_s3_app_checksum_func_mount_connection() != 60477) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_fskit_s3_app_checksum_func_mount_point_for() != 62724) {
+    if (uniffi_fskit_s3_app_checksum_func_mount_point_for() != 7150) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_fskit_s3_app_checksum_func_mount_with_secret() != 45662) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_fskit_s3_app_checksum_func_read_secret() != 59672) {
+    if (uniffi_fskit_s3_app_checksum_func_pending_secret_mounts_on_launch() != 60599) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_fskit_s3_app_checksum_func_save_connection() != 8212) {

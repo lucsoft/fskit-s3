@@ -187,6 +187,34 @@ func activateAndOpen(_ open: () -> Void) {
     open()
 }
 
+/// Present an open panel to pick a single folder (creating one is allowed). Returns
+/// the chosen path, or `nil` if cancelled. The emptiness of the folder is enforced by
+/// the contract (`saveConnection`), not here.
+@MainActor
+func chooseMountFolder() -> String? {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.prompt = "Choose"
+    panel.message = "Choose an empty folder to mount this connection into."
+    NSApplication.shared.activate(ignoringOtherApps: true)
+    return panel.runModal() == .OK ? panel.url?.path : nil
+}
+
+/// Reveal a mount folder in Finder. If it doesn't exist yet (an unmounted default
+/// path is removed on unmount), open its parent so the user still lands nearby.
+@MainActor
+func openInFinder(_ path: String) {
+    let url = URL(fileURLWithPath: path)
+    if FileManager.default.fileExists(atPath: path) {
+        NSWorkspace.shared.open(url)
+    } else {
+        NSWorkspace.shared.open(url.deletingLastPathComponent())
+    }
+}
+
 /// A modal error alert with a single OK button (mirrors the old `appkit::show_error`).
 @MainActor
 func showError(_ title: String, _ message: String) {

@@ -41,19 +41,41 @@ private struct ConnectionMenu: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
 
+    /// Where this connection mounts — its custom folder, else the default
+    /// `~/fskit-s3/<name>`. Computed in Swift (no FFI in `body`); mirrors the Rust
+    /// `Connection::mount_point` / `base_dir`.
+    private var mountPath: String {
+        if let custom = connection.mountPoint, !custom.isEmpty { return custom }
+        return (NSHomeDirectory() as NSString).appendingPathComponent("fskit-s3/\(connection.name)")
+    }
+
     var body: some View {
         let mounted = model.isMounted(connection.name)
 
         Menu {
             if mounted {
-                Button("Unmount") { unmountAction() }
+                Button { unmountAction() } label: {
+                    Label("Unmount", systemImage: "eject.fill")
+                }
             } else {
-                Button("Mount") { mountAction() }
+                Button { mountAction() }  label: {
+                    Label("Mount", systemImage: "mount")
+                }
             }
-            Button("Update…") {
+            // The mount folder + a shortcut to reveal it in Finder.
+            Text(mountPath)
+            Button {
+                openInFinder(mountPath)
+            } label: {
+                Label("Open in Finder", systemImage: "folder")
+            }
+            Divider()
+            Button {
                 activateAndOpen {
                     openWindow(value: ConnectionFormRequest(originalName: connection.name))
                 }
+            } label: {
+                Label("Configure...", systemImage: "gear")
             }
         } label: {
             Label {

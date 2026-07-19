@@ -11,8 +11,9 @@
 //! (a [`Report`], a [`Connection`], a mount list), and SwiftUI decides how to draw
 //! it (which SF Symbol, which colour, which window). The one thing that must not
 //! leak across the boundary — the S3 secret — is handled here (Keychain or a
-//! single `-o secret` mount) and only ever crosses back to Swift to pre-fill the
-//! edit form.
+//! single `-o secret` mount) and **never crosses back to Swift**: the edit form only
+//! learns *whether* a secret exists ([`has_secret`]) and, when the user leaves that
+//! placeholder untouched, [`save_connection`] reuses the stored one.
 
 use crate::connection::{self, Connection, ConnectionKind, FormInput, Registry, S3Meta};
 use crate::health::Report;
@@ -40,6 +41,41 @@ enum SecretPlan {
     Supply(String),
     /// No secret available anywhere — the caller must prompt / skip.
     Missing,
+}
+
+/// Reject a user-chosen mount folder that isn't an empty directory — mounting over a
+/// non-empty one would hide its contents. `.`-prefixed entries (e.g. `.DS_Store`) are
+/// ignored, so a folder Finder merely visited still counts as empty. A folder that
+/// doesn't exist yet is fine (created at mount time), and no custom folder (the
+/// default `~/fskit-s3/<name>`) is exempt.
+fn validate_mount_point(conn: &Connection) -> Result<(), FfiError> {
+    let Some(custom) = conn.mount_point.as_deref().filter(|p| !p.is_empty()) else {
+        return Ok(());
+    };
+    let path = std::path::Path::new(custom);
+    if !path.exists() {
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Err(FfiError::from(format!(
+            "Mount folder {custom:?} is not a folder."
+        )));
+    }
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| FfiError::from(format!("Can't read mount folder {custom:?}: {e}")))?;
+    let has_visible = entries.filter_map(Result::ok).any(|e| {
+        e.file_name()
+            .to_str()
+            .map(|n| !n.starts_with('.'))
+            .unwrap_or(true)
+    });
+    if has_visible {
+        return Err(FfiError::from(format!(
+            "Mount folder {custom:?} isn't empty — pick an empty folder (mounting over \
+             it would hide its contents)."
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve where a connection's secret is and how it must travel. Prefers the shared
@@ -121,11 +157,17 @@ pub fn list_connections() -> Vec<Connection> {
     Registry::load().list().to_vec()
 }
 
-/// The default mount point (`~/fskit-s3/<name>`) for a connection name. The menu
-/// joins this against [`list_fskit_mounts`] to show a green/grey "mounted" dot.
+/// The mount point for a connection — its custom folder if set, else the default
+/// `~/fskit-s3/<name>`. The menu joins this against [`list_fskit_mounts`] to show a
+/// green/grey "mounted" dot, and unmount targets it, so it must match what
+/// [`mount_connection`] actually mounts. Falls back to the default for an unknown
+/// name.
 #[uniffi::export]
 pub fn mount_point_for(name: String) -> String {
-    connection::default_mount_point_for(&name)
+    Registry::load()
+        .get(&name)
+        .map(|c| c.mount_point())
+        .unwrap_or_else(|| connection::default_mount_point_for(&name))
         .to_string_lossy()
         .into_owned()
 }
@@ -136,14 +178,6 @@ pub fn mount_point_for(name: String) -> String {
 #[uniffi::export]
 pub fn has_secret(name: String) -> bool {
     keychain::read_secret(&name).is_some() || disksecret::read(&name).is_some()
-}
-
-/// The stored secret for a connection, if any (Keychain first, then the dev on-disk
-/// file) — only to pre-fill the edit form so an S3 connection needn't have its secret
-/// re-typed. Never persisted by Swift.
-#[uniffi::export]
-pub fn read_secret(name: String) -> Option<String> {
-    keychain::read_secret(&name).or_else(|| disksecret::read(&name))
 }
 
 /// Validate raw form values into a [`Connection`] **without** any network or
@@ -163,12 +197,39 @@ pub fn save_connection(
     form: FormInput,
     original_name: Option<String>,
 ) -> Result<Connection, FfiError> {
-    // Keep what the live check + secret storage need before `from_form` consumes `form`.
-    let secret = form.secret.clone();
     let save_keychain = form.save_secret_to_keychain;
     let save_disk = form.save_secret_to_disk;
 
+    // On edit, "keep current password" (the form left its stored-secret placeholder
+    // untouched) reuses the stored secret (Keychain or disk), so changing other fields
+    // doesn't force a re-type. This is distinct from a *blank* Secret field, which
+    // means an empty secret (and for S3 then fails the required-secret check).
+    let mut form = form;
+    if form.is_s3 && form.keep_stored_secret {
+        if let Some(existing) = original_name
+            .as_deref()
+            .and_then(|orig| keychain::read_secret(orig).or_else(|| disksecret::read(orig)))
+        {
+            form.secret = existing;
+        }
+    }
+    // Keep what the live check + secret storage need before `from_form` consumes `form`.
+    let secret = form.secret.clone();
+
     let conn = Connection::from_form(form).map_err(FfiError::from)?;
+
+    // A newly chosen custom mount folder must be an empty directory (checked before the
+    // network test so it fails fast). On edit, only when the folder actually changed —
+    // an unchanged one may be legitimately non-empty (e.g. currently mounted). The
+    // default `~/fskit-s3/<name>` (mount_point == None) is exempt inside the validator.
+    let previous_mount_point = original_name.as_deref().and_then(|orig| {
+        Registry::load()
+            .get(orig)
+            .and_then(|c| c.mount_point.clone())
+    });
+    if conn.mount_point != previous_mount_point {
+        validate_mount_point(&conn)?;
+    }
 
     if let ConnectionKind::S3(meta) = &conn.kind {
         s3check::test_s3(meta, &secret)
@@ -218,7 +279,7 @@ pub fn save_connection(
 pub fn delete_connection(name: String) -> Result<(), FfiError> {
     let mut registry = Registry::load();
     if let Some(conn) = registry.get(&name) {
-        let mount_point = conn.default_mount_point();
+        let mount_point = conn.mount_point();
         let mount_point = mount_point.to_string_lossy();
         let mounted = mounts::list_fskit()
             .iter()
@@ -273,7 +334,7 @@ pub fn mount_connection(name: String) -> Result<(), FfiError> {
     } else {
         None
     };
-    match mounts::mount(conn, &conn.default_mount_point(), secret.as_deref()) {
+    match mounts::mount(conn, &conn.mount_point(), secret.as_deref()) {
         Ok(()) => Ok(()),
         Err(e) => Err(mount_error(&e, conn.is_s3())),
     }
@@ -303,7 +364,7 @@ pub fn mount_with_secret(
         // Best-effort likewise; the mount below carries the secret regardless.
         let _ = disksecret::store(&name, &secret);
     }
-    mounts::mount(conn, &conn.default_mount_point(), Some(&secret))
+    mounts::mount(conn, &conn.mount_point(), Some(&secret))
         .map_err(|e| mount_error(&e, conn.is_s3()))
 }
 
@@ -314,11 +375,20 @@ pub fn unmount(mount_point: String) -> Result<(), FfiError> {
     mounts::unmount(&mount_point).map_err(FfiError::from)
 }
 
+/// A connection that failed to auto-mount at launch, with the reason — so the log
+/// (and any future UI) shows *why*, not just which one.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AutoMountFailure {
+    pub connection: String,
+    pub reason: String,
+}
+
 /// Mount every connection flagged `mount_on_launch` whose secret is available
 /// (S3 connections without a stored secret are skipped — a prompt can't run
-/// unattended at launch). Best-effort; returns the names that failed, for logging.
+/// unattended at launch). Best-effort; returns the connections that failed **with the
+/// mount error**, for logging.
 #[uniffi::export]
-pub fn auto_mount_on_launch() -> Vec<String> {
+pub fn auto_mount_on_launch() -> Vec<AutoMountFailure> {
     let mut failed = Vec::new();
     for conn in Registry::load().list() {
         if !conn.mount_on_launch {
@@ -334,11 +404,30 @@ pub fn auto_mount_on_launch() -> Vec<String> {
         } else {
             None
         };
-        if mounts::mount(conn, &conn.default_mount_point(), secret.as_deref()).is_err() {
-            failed.push(conn.name.clone());
+        if let Err(reason) = mounts::mount(conn, &conn.mount_point(), secret.as_deref()) {
+            failed.push(AutoMountFailure {
+                connection: conn.name.clone(),
+                reason,
+            });
         }
     }
     failed
+}
+
+/// The launch-flagged S3 connections whose secret **isn't** available for an
+/// unattended mount — the ones [`auto_mount_on_launch`] had to skip. The UI opens a
+/// secret prompt for each so "mount when launching" still mounts (with the user
+/// typing the password) instead of silently doing nothing. Memory connections and
+/// those with a usable secret are omitted (they auto-mount headlessly).
+#[uniffi::export]
+pub fn pending_secret_mounts_on_launch() -> Vec<String> {
+    Registry::load()
+        .list()
+        .iter()
+        .filter(|c| c.mount_on_launch && c.is_s3())
+        .filter(|c| matches!(secret_plan(&c.name), SecretPlan::Missing))
+        .map(|c| c.name.clone())
+        .collect()
 }
 
 /// Cleanly unmount every volume this app serves — called on quit. A clean (non-

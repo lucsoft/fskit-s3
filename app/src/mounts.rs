@@ -120,12 +120,15 @@ pub fn unmount(mount_point: &str) -> Result<(), String> {
     if !out.status.success() {
         return Err(stderr_or_status(&out));
     }
-    // The volume is detached now, so the mount point is a plain empty directory the
-    // app created at mount time. Remove it so an unmounted connection leaves no
-    // stray folder behind. Best-effort and empty-only (`remove_dir`, not
-    // `remove_dir_all`): if anything is there, or it's still busy, leave it be — a
-    // later mount recreates it anyway.
-    let _ = fs::remove_dir(mount_point);
+    // The volume is detached now, so the mount point is a plain empty directory. If
+    // it's an **app-managed default** point (under `~/fskit-s3/`, created by us at
+    // mount time), remove it so an unmounted connection leaves no stray folder
+    // behind — best-effort and empty-only (`remove_dir`, not `remove_dir_all`). But a
+    // **user-chosen** mount folder (anywhere else) is theirs: never delete it, even
+    // though it's empty again post-unmount.
+    if Path::new(mount_point).starts_with(crate::connection::base_dir()) {
+        let _ = fs::remove_dir(mount_point);
+    }
     Ok(())
 }
 

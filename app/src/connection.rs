@@ -33,6 +33,11 @@ pub struct Connection {
     /// Mount this connection automatically when the app launches.
     #[serde(default)]
     pub mount_on_launch: bool,
+    /// A custom mount point (an empty folder the user picked at creation). `None`
+    /// (or empty) ⇒ the default `~/fskit-s3/<name>`. Resolved via
+    /// [`Connection::mount_point`].
+    #[serde(default)]
+    pub mount_point: Option<String>,
 }
 
 /// Which backend a connection is served by.
@@ -65,6 +70,7 @@ impl Connection {
             save_secret_to_keychain: false,
             save_secret_to_disk: false,
             mount_on_launch: false,
+            mount_point: None,
         }
     }
 
@@ -73,14 +79,20 @@ impl Connection {
         matches!(self.kind, ConnectionKind::S3(_))
     }
 
-    /// Where this connection is mounted by default (`~/fskit-s3/<name>`).
-    ///
-    /// This path doubles as the `mount` resource argument: the extension never
-    /// reads the resource's contents (it picks its backend from the `-o`
-    /// options), so the mount point serves as its own resource. It's distinct
-    /// per connection, so FSKit container identities don't collide.
+    /// The default mount point for this connection (`~/fskit-s3/<name>`), used when
+    /// no custom [`mount_point`](Connection::mount_point) is set.
     pub fn default_mount_point(&self) -> PathBuf {
         default_mount_point_for(&self.name)
+    }
+
+    /// Where this connection actually mounts: the user's chosen folder if set,
+    /// otherwise [`default_mount_point`](Connection::default_mount_point). This is the
+    /// path handed to `mount` (distinct from the config-carrying `source_path`).
+    pub fn mount_point(&self) -> PathBuf {
+        match &self.mount_point {
+            Some(p) if !p.is_empty() => PathBuf::from(p),
+            _ => self.default_mount_point(),
+        }
     }
 
     /// The **source path** handed to `mount` — the connection's config, made
@@ -137,6 +149,13 @@ impl Connection {
             );
         }
 
+        // A custom mount folder (empty ⇒ the default `~/fskit-s3/<name>`). Whether it
+        // exists and is empty is checked with I/O in `save_connection`, not here.
+        let mount_point = {
+            let m = input.mount_point.trim();
+            (!m.is_empty()).then(|| m.to_string())
+        };
+
         if !input.is_s3 {
             return Ok(Connection {
                 name: name.to_string(),
@@ -144,6 +163,7 @@ impl Connection {
                 save_secret_to_keychain: false,
                 save_secret_to_disk: false,
                 mount_on_launch: input.mount_on_launch,
+                mount_point,
             });
         }
 
@@ -215,6 +235,7 @@ impl Connection {
             save_secret_to_keychain: input.save_secret_to_keychain,
             save_secret_to_disk: input.save_secret_to_disk,
             mount_on_launch: input.mount_on_launch,
+            mount_point,
         })
     }
 }
@@ -230,11 +251,18 @@ pub struct FormInput {
     pub access_key_id: String,
     pub secret: String,
     pub session_token: String,
+    /// On edit, keep the already-stored secret instead of using `secret` — set when
+    /// the form's Secret field was left as its "a secret exists" placeholder (see
+    /// `save_connection`). A *blank* `secret` is not this: it means an empty secret.
+    pub keep_stored_secret: bool,
     pub save_secret_to_keychain: bool,
     /// Store the secret as a dev-only plaintext file on disk (see
     /// [`Connection::save_secret_to_disk`]). Insecure; for unsigned builds.
     pub save_secret_to_disk: bool,
     pub mount_on_launch: bool,
+    /// A custom mount folder; empty ⇒ the default `~/fskit-s3/<name>` (see
+    /// [`Connection::mount_point`]).
+    pub mount_point: String,
 }
 
 /// An S3 endpoint must be an `http`/`https` URL with a host.
@@ -344,8 +372,10 @@ pub fn default_mount_point_for(name: &str) -> PathBuf {
 }
 
 /// The base directory for fskit-s3's mount points and resource dirs
-/// (`~/fskit-s3`, or `/tmp/fskit-s3` if `$HOME` is unset).
-fn base_dir() -> PathBuf {
+/// (`~/fskit-s3`, or `/tmp/fskit-s3` if `$HOME` is unset). Exposed so the unmount
+/// path can tell an app-managed default mount point (safe to clean up) from a
+/// user-chosen folder (must be left alone).
+pub(crate) fn base_dir() -> PathBuf {
     match std::env::var_os("HOME") {
         Some(home) if !home.is_empty() => PathBuf::from(home).join("fskit-s3"),
         _ => PathBuf::from("/tmp/fskit-s3"),
@@ -380,6 +410,7 @@ mod tests {
             save_secret_to_keychain: true,
             save_secret_to_disk: false,
             mount_on_launch: false,
+            mount_point: None,
         }
     }
 
@@ -394,9 +425,11 @@ mod tests {
             access_key_id: "AKIA".to_string(),
             secret: "s3cr3t".to_string(),
             session_token: String::new(),
+            keep_stored_secret: false,
             save_secret_to_keychain: true,
             save_secret_to_disk: false,
             mount_on_launch: false,
+            mount_point: String::new(),
         }
     }
 
@@ -428,6 +461,33 @@ mod tests {
         .unwrap();
         assert!(disk.save_secret_to_disk);
         assert!(!disk.save_secret_to_keychain);
+    }
+
+    #[test]
+    fn mount_point_is_custom_or_default() {
+        // No custom folder ⇒ the default `~/fskit-s3/<name>`.
+        let def = s3_conn("photos");
+        assert_eq!(def.mount_point(), default_mount_point_for("photos"));
+
+        // A custom (non-empty) folder is used verbatim.
+        let mut custom = s3_conn("photos");
+        custom.mount_point = Some("/Volumes/backup".to_string());
+        assert_eq!(custom.mount_point(), PathBuf::from("/Volumes/backup"));
+
+        // An empty string is treated as "no custom folder".
+        let mut blank = s3_conn("photos");
+        blank.mount_point = Some(String::new());
+        assert_eq!(blank.mount_point(), default_mount_point_for("photos"));
+
+        // from_form maps a blank form field to None and a real one to Some.
+        let from_blank = Connection::from_form(s3_form()).unwrap();
+        assert_eq!(from_blank.mount_point, None);
+        let from_custom = Connection::from_form(FormInput {
+            mount_point: "  /Volumes/backup  ".to_string(),
+            ..s3_form()
+        })
+        .unwrap();
+        assert_eq!(from_custom.mount_point.as_deref(), Some("/Volumes/backup"));
     }
 
     #[test]
