@@ -91,16 +91,18 @@ private func freshnessLine(_ freshness: Freshness) -> StatusLine? {
     case .match(let sha, let dirty):
         if dirty {
             return StatusLine(symbol: "checkmark.seal", color: .yellow,
-                              text: "Registered build matches this app (\(sha)) — dirty build, so equal SHAs aren't a guarantee.")
+                              text: "Extension build matches this app (\(sha)) — dirty build, so equal SHAs aren't a guarantee.")
         }
         return StatusLine(symbol: "checkmark.seal.fill", color: .green,
-                          text: "Registered build matches this app (\(sha)).")
+                          text: "Extension build matches this app (\(sha)).")
     case .mismatch(let registered, let host):
+        // When the extension is enabled this is the *running* build (the /_info probe);
+        // otherwise it's the build fskitd would launch (the bundle on disk).
         return StatusLine(
             symbol: "exclamationmark.triangle.fill", color: .orange,
             text: """
-                Build mismatch — fskitd will launch a DIFFERENT build.
-                Registered: \(registered)
+                Build mismatch — a DIFFERENT extension build than this app.
+                Extension: \(registered)
                 This app: \(host)
                 Relaunch to re-register; if it persists: sudo killall fskitd
                 """)

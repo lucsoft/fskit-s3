@@ -257,17 +257,36 @@ pub(crate) enum BuildOutcome {
 
 /// Resolve a parsed config map into a backend, dispatching on `type`.
 ///
-/// `type=memory` ⇒ the demo; `type=s3` ⇒ an S3 bucket. A missing/unknown `type` or
-/// missing required S3 fields is an `Err` — the caller fails the **load**, which
-/// fskitd cleanly unwinds. A valid S3 config with no obtainable secret is
-/// `Ok(NeedSecret)` — deferred to `activate`, not failed.
+/// `type=memory` ⇒ the demo; `type=s3` ⇒ an S3 bucket; `type=_info` ⇒ the version
+/// probe (always `Err`, on purpose). A missing/unknown `type` or missing required S3
+/// fields is an `Err` — the caller fails the **load**, which fskitd cleanly unwinds
+/// (so the `/_info` probe leaves no stuck instance). A valid S3 config with no
+/// obtainable secret is `Ok(NeedSecret)` — deferred to `activate`, not failed.
 pub(crate) fn build_backend(opts: HashMap<String, String>) -> Result<BuildOutcome, String> {
     match opts.get("type").map(String::as_str) {
         Some("memory") => Ok(BuildOutcome::Ready(demo_backend())),
         Some("s3") => build_s3_backend(opts),
+        // The `/_info` probe: never a real mount — it *fails the load* on purpose,
+        // carrying the running build's identity so a health check can read what's
+        // actually loaded (see `info_message`).
+        Some("_info") => Err(info_message()),
         Some(other) => Err(format!("unknown connection type {other:?}")),
         None => Err("no connection type in source path".to_string()),
     }
+}
+
+/// The version + git SHA of the *running* extension, surfaced by failing the special
+/// `mount -F -t fskit-s3 /_info <point>` probe. This reflects the process fskitd
+/// actually has loaded — which the daemon can cache stale (an old process) even after
+/// the bundle on disk is rebuilt, the exact case the host/bundle SHA comparison can't
+/// see. The `version=… sha=…` shape is a **stable contract**: the app parses those
+/// fields out of the mount error (`app/src/mounts.rs::parse_info`).
+fn info_message() -> String {
+    format!(
+        "fskit-s3 running: version={} sha={}",
+        env!("CARGO_PKG_VERSION"),
+        env!("FSKIT_S3_GIT_SHA")
+    )
 }
 
 /// Build the S3 backend from a parsed config map, or defer if only the secret is

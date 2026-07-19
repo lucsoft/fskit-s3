@@ -110,6 +110,55 @@ fn format_options(opts: &[(String, String)]) -> Option<String> {
     Some(joined)
 }
 
+/// The running extension's self-report, from the `/_info` probe mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InfoReport {
+    pub version: String,
+    pub sha: String,
+}
+
+/// Ask the **running** extension what build it is by attempting the special `/_info`
+/// mount, which the extension answers by *failing the load* with a `version=… sha=…`
+/// message. Unlike comparing the on-disk bundle's SHA, this reflects the process
+/// fskitd actually has loaded — which the daemon can cache stale. Returns `None` when
+/// the extension isn't reachable (not installed/enabled) or the reply can't be parsed.
+///
+/// The load deliberately fails, so nothing mounts and there's no fskitd record to
+/// clean up; the throwaway mount point is removed regardless.
+pub fn probe_info() -> Option<InfoReport> {
+    let dir = std::env::temp_dir().join(format!("fskit-s3-info-{}", std::process::id()));
+    let _ = fs::create_dir_all(&dir);
+    let out = Command::new("/sbin/mount")
+        .args(["-F", "-t", FS_TYPE, "/_info"])
+        .arg(&dir)
+        .output();
+    let _ = fs::remove_dir(&dir);
+    let out = out.ok()?;
+    // The identity rides the mount error (stderr); a successful mount would be
+    // unexpected, but read both streams to be safe.
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    parse_info(&text)
+}
+
+/// Parse `version=<v> sha=<s>` out of the `/_info` mount reply. Split-based (no
+/// indexing) so it stays within the crate's no-panic lint.
+fn parse_info(text: &str) -> Option<InfoReport> {
+    Some(InfoReport {
+        version: field(text, "version=")?,
+        sha: field(text, "sha=")?,
+    })
+}
+
+/// The whitespace-delimited value following the first `key` (e.g. `sha=`) in `text`.
+fn field(text: &str, key: &str) -> Option<String> {
+    let value = text.split(key).nth(1)?.split_whitespace().next()?;
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 /// Unmount a path via `diskutil unmount`. Returns the tool's stderr on failure.
 pub fn unmount(mount_point: &str) -> Result<(), String> {
     let out = Command::new("/usr/sbin/diskutil")
@@ -192,6 +241,23 @@ fskit-s3://b on /Volumes/b (fskit-s3, local)";
             format_options(&opts).as_deref(),
             Some("endpoint=http://x,bucket=b")
         );
+    }
+
+    #[test]
+    fn parses_info_probe_reply() {
+        // A typical `mount` error carrying the /_info payload.
+        let reply = "mount: /tmp/x: fskit-s3 running: version=0.0.1 sha=8a46935-dirty\n";
+        let info = parse_info(reply).unwrap();
+        assert_eq!(info.version, "0.0.1");
+        assert_eq!(info.sha, "8a46935-dirty");
+
+        // A sha at the very end (no trailing whitespace) still parses.
+        assert_eq!(
+            parse_info("version=1.2.3 sha=abcdef").unwrap().sha,
+            "abcdef"
+        );
+        // Missing fields ⇒ None (e.g. an "extension not found" error).
+        assert!(parse_info("mount: unknown filesystem type 'fskit-s3'").is_none());
     }
 
     #[test]

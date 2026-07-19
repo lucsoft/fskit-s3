@@ -152,7 +152,12 @@ prefix).
   access_key_id=..&endpoint=..`), which FSKit delivers as an `FSPathURLResource`
   (`parse_source_path` → `build_backend`). Resolving at load (Apple's model) means
   a **bad config fails the load**, which fskitd cleanly unwinds — no stuck instance
-  / "Resource busy" on retry. `activateWithOptions:` is then trivial. The **secret**
+  / "Resource busy" on retry. A special `type=_info` source (`/_info`) is the
+  **version probe**: `build_backend` returns `Err("fskit-s3 running: version=<v>
+  sha=<sha>")`, so `mount -F -t fskit-s3 /_info <point>` *fails the load* carrying the
+  **running** build's identity (compiled-in `CARGO_PKG_VERSION` + `FSKIT_S3_GIT_SHA`).
+  The `version=…/sha=…` shape is a contract the app parses (`mounts::probe_info`) to
+  see what's actually loaded, not just what's on disk. `activateWithOptions:` is then trivial. The **secret**
   is never in the path: `Keychain[name]`, or — when the ext can't read the Keychain
   (unsigned build) — an `-o secret` that only arrives at `activate`, so a valid
   config lacking only the secret is *deferred* to activate (`VolumeIvars.pending`),
@@ -191,13 +196,19 @@ prefix).
   - `s3check.rs` — the "Test and Save" credential check (lists the bucket via
     `fskit-s3-backend`/OpenDAL, the same backend the extension serves with).
   - `mounts.rs` — the mount table + `mount`/`unmount` (`mount -F -t fskit-s3
-    [-o …]`). No bespoke CLI — the system `mount`/`umount` are that.
+    [-o …]`). No bespoke CLI — the system `mount`/`umount` are that. `unmount`
+    removes the now-empty mount-point dir **only when it's app-managed** (under
+    `~/fskit-s3/`); a user-chosen mount folder is left alone.
   - `health.rs` — the FSKit extension-health check via `FSClient`
     (`fetchInstalledExtensionsWithCompletionHandler:`, bridged to a synchronous
     `check()` with a `block2` completion + an `mpsc` channel and a short timeout):
     installed/enabled state, plus a **build-mismatch** check comparing the git SHA
     (`FSKitS3GitSHA` in the Info.plist) of the bundle FSKit will launch
-    (`FSModuleIdentity.url`) against this app's own. `check()` **blocks**, so the
+    (`FSModuleIdentity.url`) against this app's own. When the module is **enabled** it
+    goes one better: it probes the *running* process via `mounts::probe_info()` (the
+    `/_info` mount — see below) and uses that SHA for the freshness verdict, so it
+    catches the daemon-cache case the bundle SHA can't (right bundle on disk, stale
+    *loaded* process). `check()` **blocks** (now also on the probe mount), so the
     SwiftUI side calls it off the main actor (a `Task.detached`).
   - `autostart.rs` — launch-at-login via `SMAppService.mainApp` (register + status);
     best-effort (a dev build that can't register just won't auto-start).
@@ -488,6 +499,12 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   never in the path (it'd show in `ps`/`mount`): `Keychain[name]`, else an
   `-o secret` at `activate` (so a valid config still lacking a secret is *deferred*
   to activate, not failed).
+- **`/_info` probes the *running* build, not the bundle.** `mount -F -t fskit-s3
+  /_info /tmp/whatever` fails on purpose with `… version=<v> sha=<sha>` — the
+  compiled-in identity of the extension process fskitd currently has loaded. It's the
+  only way (short of the `activate` log) to catch daemon-cache staleness (right bundle
+  on disk, stale loaded process); the health check runs it automatically when the
+  module is enabled. It fails at *load*, so it leaves no mount and no stuck instance.
 - **An arbitrary-scheme source URL crashes fskitd — use a plain path.** Giving
   `mount` an `s3://…` source (with `FSSupportsGenericURLResources`) makes fskitd
   **segfault** in `-[FSPathURLResource makeProxy]` (it coerces the URL into a path

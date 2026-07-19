@@ -96,9 +96,44 @@ pub fn check() -> Report {
     }
 
     match rx.recv_timeout(CHECK_TIMEOUT) {
-        Ok(report) => report,
+        Ok(mut report) => {
+            // `build_report` read the SHA off the bundle on disk. When the module is
+            // enabled, ask the *running* extension what it actually is via the `/_info`
+            // probe mount — fskitd can keep an old process loaded even after the bundle
+            // is rebuilt, which the on-disk comparison can't see. The probe wins when it
+            // yields a real SHA; otherwise the bundle-based freshness stands.
+            if report.health == Health::Ready {
+                if let Some(fresh) = running_freshness() {
+                    report.freshness = fresh;
+                }
+            }
+            report
+        }
         Err(_) => Report::error("timed out asking FSKit (fskit_agent)"),
     }
+}
+
+/// Freshness computed from the *running* extension (via the `/_info` probe) against
+/// this app, preferred over the on-disk bundle SHA when the module is enabled and
+/// answers. `None` (fall back to the bundle comparison) when the probe can't be
+/// reached or either SHA isn't a real identity.
+fn running_freshness() -> Option<Freshness> {
+    let running = crate::mounts::probe_info()?.sha;
+    let host = host_sha()?;
+    if !is_real_sha(&running) || !is_real_sha(&host) {
+        return None;
+    }
+    Some(if running == host {
+        Freshness::Match {
+            dirty: running.ends_with("-dirty"),
+            sha: running,
+        }
+    } else {
+        Freshness::Mismatch {
+            registered: running,
+            host,
+        }
+    })
 }
 
 /// The shared `FSClient` instance (`+[FSClient sharedInstance]`).
