@@ -42,12 +42,13 @@ private struct ConnectionMenu: View {
                 }
             }
         } label: {
-            // A filled dot when mounted, a hollow one when not. (SwiftUI menus render
-            // item glyphs monochrome, so the shape — not colour — carries the state.)
-            Label(
-                "\(connection.name)  (\(kindLabel(connection.kind)))",
-                systemImage: mounted ? "circle.fill" : "circle",
-            )
+            // A green filled dot when mounted, a hollow grey one when not.
+            Label {
+                Text("\(connection.name)  (\(kindLabel(connection.kind)))")
+            } icon: {
+                Image(systemName: mounted ? "circle.fill" : "circle")
+                    .foregroundStyle(mounted ? Color.green : Color.secondary)
+            }
         }
     }
 
