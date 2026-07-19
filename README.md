@@ -5,7 +5,7 @@ read files from it — like any other drive, except the bytes live in object
 storage. No kernel extension, no macFUSE, no security downgrade.
 
 It works by building on **FSKit**, Apple's userspace filesystem framework
-(macOS 26+). The name says S3, but nothing in the design is S3-specific: storage
+(macOS 15.4+, only tested 26). The name says S3, but nothing in the design is S3-specific: storage
 sits behind one small trait implemented over [Apache OpenDAL](https://opendal.apache.org),
 so WebDAV, SFTP, and ~40 other services are a feature flag away.
 
