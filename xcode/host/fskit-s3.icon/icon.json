@@ -1,0 +1,69 @@
+{
+  "fill" : {
+    "automatic-gradient" : "display-p3:0.07113,0.15736,0.18865,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode" : "overlay",
+          "fill" : {
+            "solid" : "display-p3:1.00000,0.94626,0.92939,1.00000"
+          },
+          "glass" : false,
+          "image-name" : "S3 FSKIT.svg",
+          "name" : "S3 FSKIT",
+          "position" : {
+            "scale" : 6.56,
+            "translation-in-points" : [
+              2.025913347997516,
+              0.0482846381949571
+            ]
+          }
+        },
+        {
+          "blend-mode" : "plus-lighter",
+          "fill" : "automatic",
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Rectangle 1.svg",
+          "name" : "Rectangle 1",
+          "opacity-specializations" : [
+            {
+              "value" : 0.2
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.5
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.2
+            }
+          ],
+          "position" : {
+            "scale" : 7.1,
+            "translation-in-points" : [
+              1.8384092133760532,
+              1.7402099999999905
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

@@ -90,6 +90,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.lucsoft.fskit-s3
         PRODUCT_NAME: fskit-s3
+        # App icon in Apple's Icon Composer `.icon` format (xcode/host/fskit-s3.icon),
+        # bundled as a target source. macOS 26 / Xcode 26 renders it directly; the name
+        # is the bundle basename without the `.icon` extension.
+        ASSETCATALOG_COMPILER_APPICON_NAME: fskit-s3
         CODE_SIGN_ENTITLEMENTS: xcode/App.entitlements
         GENERATE_INFOPLIST_FILE: "YES"
         # Status-bar (accessory) app: no Dock tile, no main window.
