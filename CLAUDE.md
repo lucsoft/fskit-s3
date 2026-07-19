@@ -230,6 +230,14 @@ prefix).
   `libfskit_s3_app.a` in `$BUILT_PRODUCTS_DIR`, which the host links (its Swift
   bootstrap calls the exported `fskit_s3_app_run`). No SHA env — the app reads its
   own bundle's `FSKitS3GitSHA` (stamped by `stamp-git-sha.sh`) at runtime.
+- **`scripts/dev-app.sh`** — one-command dev install: build the host bundle
+  (Debug), install it to `/Applications`, `lsregister` it, and launch. This is the
+  *only* way to get the **extension** registered — `cargo run -p fskit-s3-app`
+  builds a bare, unsigned binary with no embedded `.appex`, so macOS has nothing to
+  register as a File System Extension (registration comes only from the signed
+  `.app`, and reliably only from a stable location like `/Applications`). The
+  extension needs reinstalling only when `ext/` changes; `cargo run` is fine for
+  UI-only iteration against the already-installed extension.
 - **`scripts/git-sha.sh`** — prints `git describe --always --dirty`; the single
   source of the build SHA. **`scripts/stamp-git-sha.sh`** — a Run Script phase on
   *both* targets that writes that SHA into the built `Info.plist` (`FSKitS3GitSHA`)

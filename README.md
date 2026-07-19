@@ -28,11 +28,18 @@ are covered in [`CLAUDE.md`](CLAUDE.md).
 **Then mount something.** The app is a ☁ menu-bar item (its top row is the
 extension's health). **Add mount…** creates a connection — an in-memory demo, or
 an S3 bucket (endpoint / bucket / region / keys, secret saved to your Keychain) —
-and the menu mounts and unmounts it. For development you can run the same app
-standalone, without building the host bundle:
+and the menu mounts and unmounts it.
+
+For UI development you can run the app standalone with `cargo run -p fskit-s3-app`
+— **but note this does *not* register the extension.** `cargo run` builds a bare,
+unsigned binary with no embedded `.appex`, so macOS has nothing to register as a
+File System Extension; the extension only comes from the signed `.app` bundle,
+installed to `/Applications`. So: install the extension **once** (or whenever
+`ext/` changes) with the bundle, then iterate the UI with `cargo run`.
 
 ```sh
-cargo run -p fskit-s3-app
+scripts/dev-app.sh        # build the bundle -> install to /Applications -> launch
+cargo run -p fskit-s3-app # UI-only iteration, against the installed extension
 ```
 
 There's no bespoke CLI: a connection is just the system `mount` tool. The config
