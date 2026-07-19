@@ -207,6 +207,15 @@ prefix).
   source of the build SHA. **`scripts/stamp-git-sha.sh`** — a Run Script phase on
   *both* targets that writes that SHA into the built `Info.plist` (`FSKitS3GitSHA`)
   before code-signing, so the host can compare host vs extension.
+- **`scripts/e2e-mount.sh`** — on-device e2e test through the **real mount stack**
+  (`/sbin/mount -F -t fskit-s3` → fskitd → ext → backend), complementing
+  `backend/tests/live_s3.rs` (which drives the trait directly). Mounts a fresh
+  throwaway volume (S3/RustFS by default, or `/memory`), runs the file lifecycle
+  (create → update → update → stat/modified → truncate → rename → delete, plus a
+  directory) with plain shell tools, and unmounts via `diskutil` (clean fskitd
+  deregistration). Unique per-run mount point + connection name, self-cleaning,
+  never touches an existing mount. Tests the **currently installed** ext build, so
+  rebuild the host app first to exercise new ext code.
 - **`ext/src/oslog.rs`** — public logging via `os_log` (`%{public}s`). `NSLog`
   output is stored as a redacted argument (shows as `<private>` in `log stream`
   unless private-data mode is on), which hid our diagnostics exactly when needed;
@@ -385,7 +394,8 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
 
 Next: verify the **write path** end-to-end on a signed build (create/write/mv/rm/
 truncate against a real bucket via Finder + shell — the trait and its two backends
-are unit-tested, but the FSKit write ops haven't been exercised on device); verify
+are unit-tested; `scripts/e2e-mount.sh` now drives exactly this through a real
+`/sbin/mount`, so run it against a freshly rebuilt ext to confirm on device); verify
 the S3 read path end-to-end too (framework linking + reading the shared Keychain
 group from the `fskitd` sandbox); move the app's "Test & Save" network check off
 the main thread. Possible write follow-ups: buffer a file's writes per open handle

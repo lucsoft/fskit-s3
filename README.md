@@ -106,6 +106,25 @@ Point them at any other S3 (real AWS, MinIO, R2, …) by setting `RUSTFS_ENDPOIN
 to its URL and overriding the `FSKIT_S3_BUCKET` / `FSKIT_S3_REGION` /
 `FSKIT_S3_ACCESS_KEY_ID` / `FSKIT_S3_SECRET_ACCESS_KEY` env vars.
 
+### End-to-end (through the real mount)
+
+`backend/tests/live_s3.rs` drives the `StorageBackend` trait directly.
+`scripts/e2e-mount.sh` goes a layer up and exercises the whole stack the way a
+user does — `/sbin/mount -F -t fskit-s3` → `fskitd` → the extension → the backend
+— running the same lifecycle (create → update → update → stat/modified →
+truncate → rename → delete, plus a directory) with plain shell tools on a fresh,
+throwaway mount point, then unmounting. It needs the extension **installed and
+enabled** (it tests whatever build is currently installed, so rebuild the host
+app first to exercise new ext code).
+
+```sh
+scripts/e2e-mount.sh s3        # against the compose.yaml RustFS (default)
+scripts/e2e-mount.sh memory    # the credential-free in-memory demo
+```
+
+It uses a unique per-run mount point and connection name, cleans up after itself,
+and never touches any existing mount.
+
 ## TODO
 
 - [x] `core` — async `StorageBackend` trait + path/key helpers + in-memory demo
