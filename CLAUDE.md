@@ -460,18 +460,16 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   framework shouldn't crash on input — but unavoidable from our side.)
 - Nuclear reset for accumulated daemon state: `sudo killall fskitd`.
 
-Next: verify the **write path** end-to-end on a signed build (create/write/mv/rm/
-truncate against a real bucket via Finder + shell — the trait and its two backends
-are unit-tested; `scripts/e2e-mount.sh` now drives exactly this through a real
-`/sbin/mount`, so run it against a freshly rebuilt ext to confirm on device); verify
-the S3 read path end-to-end too (framework linking + reading the shared Keychain
-group from the `fskitd` sandbox). Possible write follow-ups: buffer a file's writes
-per open handle and flush once (today each `writeContents` is a whole-object
-read-modify-write, and each `getAttributes` on a file costs a `stat`), and serialize
-concurrent writes to one path (parallel `writeContents` calls could race the
-read-modify-write). (The app is now SwiftUI over the UniFFI contract; "Test & Save"
-already runs off the main actor. Small deferred UI bit: auto-raise the health window
-at launch when the extension isn't ready — awkward from a SwiftUI `MenuBarExtra`.)
+The **write and read paths are verified end-to-end on a signed build** —
+create/write/mv/rm/truncate against a real bucket via Finder + shell, and the S3
+read path incl. framework linking + reading the shared Keychain group from the
+`fskitd` sandbox (`scripts/e2e-mount.sh` drives the lifecycle through a real
+`/sbin/mount`). Remaining write follow-ups: buffer a file's writes per open handle
+and flush once (today each `writeContents` is a whole-object read-modify-write, and
+each `getAttributes` on a file costs a `stat`), and serialize concurrent writes to
+one path (parallel `writeContents` calls could race the read-modify-write). (The app
+is now SwiftUI over the UniFFI contract; "Test & Save" runs off the main actor, and
+the health window auto-raises at launch when the extension isn't ready.)
 
 ## The Photos question (deferred)
 

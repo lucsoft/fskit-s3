@@ -137,11 +137,11 @@ and never touches any existing mount.
 - [x] `backend` — `StorageBackend` over OpenDAL (S3), tested against its in-memory service
 - [x] `ext` — mounts and serves files on macOS 26 (in-memory demo + real S3 bucket)
 - [x] `app` — SwiftUI menu-bar app over a UniFFI contract to the Rust core (connections, Keychain secrets, mounting)
-- [x] Read-only browsing: list + read
+- [x] Browsing + read: list + read
+- [x] Write support: create / write / truncate / rename / remove (whole-object read-modify-write)
 - [x] "Test & Save" credential check runs off the main actor (no UI stall)
-- [ ] Verify the S3 path end-to-end on a signed build (framework linking + reading the shared Keychain group from the `fskitd` sandbox)
+- [x] Verified end-to-end on a signed build — write + S3 read paths (framework linking + reading the shared Keychain group from the `fskitd` sandbox)
 - [ ] More backends — WebDAV, SFTP (OpenDAL feature flag + constructor; trait and FSKit glue don't change)
-- [ ] Write support (the volume is read-only today; mutating ops reply `EROFS`)
 - [ ] The Photos question — needs a block-device FSKit filesystem, not the unary one here; a separate track (see [`CLAUDE.md`](CLAUDE.md))
 
 ## License
