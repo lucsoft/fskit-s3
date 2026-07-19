@@ -20,8 +20,8 @@ settings:
     DEVELOPMENT_TEAM: H8563U643B
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "0.0.1"
+    CURRENT_PROJECT_VERSION: "1"
     # Xcode 16's debug-dylib splits the binary into a stub launcher + a
     # .debug.dylib. The system launches app extensions directly, and the stub
     # indirection breaks that ("Unable to invoke task", no logs/crash). Off.
