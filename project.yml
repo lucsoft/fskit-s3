@@ -23,7 +23,7 @@ settings:
     DEVELOPMENT_TEAM: H8563U643B
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.0.1"
+    MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     # Generate Swift asset-symbol extensions on Apple framework color/image types
     # (e.g. `Color(.myColor)`), the modern default. Inert until an asset catalog
