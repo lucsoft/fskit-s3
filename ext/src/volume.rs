@@ -390,6 +390,7 @@ define_class!(
             let child = join(dir.path(), &name_str);
             match self.ivars().rt.block_on(backend.create(&child, kind)) {
                 Ok(()) => {
+                    crate::log_line(&format!("createItem {child} ({kind:?}): ok"));
                     // FSKit keeps the item (until reclaimItem) → transfer ownership.
                     let item = S3Item::new(child, kind == EntryKind::Dir, 0);
                     let fname = FSFileName::nameWithString(&NSString::from_str(&name_str));
@@ -399,11 +400,14 @@ define_class!(
                         ptr::null_mut(),
                     ));
                 }
-                Err(e) => reply.call((
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    Retained::as_ptr(&err(errno(&e))) as *mut NSError,
-                )),
+                Err(e) => {
+                    crate::log_line(&format!("createItem {child} ({kind:?}): {e:?}"));
+                    reply.call((
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        Retained::as_ptr(&err(errno(&e))) as *mut NSError,
+                    ));
+                }
             }
         }
 
@@ -443,22 +447,52 @@ define_class!(
         fn removeItem(
             &self,
             item: Option<&FSItem>,
-            _name: &FSFileName,
-            _directory: &FSItem,
+            name: &FSFileName,
+            directory: Option<&FSItem>,
             reply: &DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            let (Some(item), Some(backend)) = (as_s3_item(item), self.backend()) else {
+            // Resolve *what to remove* from (directory, name) — the authoritative
+            // POSIX target — instead of the `item` pointer. FSKit sometimes hands a
+            // callback a null or non-S3 `item` (the reason every other callback takes
+            // `Option<&FSItem>`; see the note above `as_s3_item`), and Apple's own
+            // sample unlinks via (dir, name), not the item. The previous code keyed
+            // the whole delete off `item.path()`, so a null/foreign item fell through
+            // to EIO and the unlink was silently dropped — precisely how an editor's
+            // write-probe files (`4913`, `5036`, …) leak into the bucket.
+            let (Some(dir), Some(name_str), Some(backend)) = (
+                as_s3_item(directory),
+                file_name_string(name),
+                self.backend(),
+            ) else {
+                crate::log_line("removeItem: missing directory/name/backend -> EIO");
                 reply.call((Retained::as_ptr(&err(libc::EIO)) as *mut NSError,));
                 return;
             };
-            let kind = if item.is_dir() {
-                EntryKind::Dir
-            } else {
-                EntryKind::File
+            let child = join(dir.path(), &name_str);
+            // Kind picks file-delete vs. rmdir. Prefer the item's own kind; when
+            // FSKit gave us no usable item, ask the backend.
+            let kind = match as_s3_item(item).map(|it| it.is_dir()) {
+                Some(true) => EntryKind::Dir,
+                Some(false) => EntryKind::File,
+                None => match self.ivars().rt.block_on(backend.stat(&child)) {
+                    Ok(e) if e.is_dir() => EntryKind::Dir,
+                    Ok(_) => EntryKind::File,
+                    Err(e) => {
+                        crate::log_line(&format!("removeItem {child}: stat failed: {e:?}"));
+                        reply.call((Retained::as_ptr(&err(errno(&e))) as *mut NSError,));
+                        return;
+                    }
+                },
             };
-            match self.ivars().rt.block_on(backend.remove(item.path(), kind)) {
-                Ok(()) => reply.call((ptr::null_mut(),)),
-                Err(e) => reply.call((Retained::as_ptr(&err(errno(&e))) as *mut NSError,)),
+            match self.ivars().rt.block_on(backend.remove(&child, kind)) {
+                Ok(()) => {
+                    crate::log_line(&format!("removeItem {child} ({kind:?}): ok"));
+                    reply.call((ptr::null_mut(),));
+                }
+                Err(e) => {
+                    crate::log_line(&format!("removeItem {child} ({kind:?}): {e:?}"));
+                    reply.call((Retained::as_ptr(&err(errno(&e))) as *mut NSError,));
+                }
             }
         }
 
@@ -487,15 +521,20 @@ define_class!(
                 return;
             };
             let dst = join(dest_dir.path(), &dest_name);
-            match self.ivars().rt.block_on(backend.rename(item.path(), &dst)) {
+            let src = item.path().to_string();
+            match self.ivars().rt.block_on(backend.rename(&src, &dst)) {
                 Ok(()) => {
+                    crate::log_line(&format!("renameItem {src} -> {dst}: ok"));
                     let fname = FSFileName::nameWithString(&NSString::from_str(&dest_name));
                     reply.call((Retained::as_ptr(&fname) as *mut FSFileName, ptr::null_mut()));
                 }
-                Err(e) => reply.call((
-                    ptr::null_mut(),
-                    Retained::as_ptr(&err(errno(&e))) as *mut NSError,
-                )),
+                Err(e) => {
+                    crate::log_line(&format!("renameItem {src} -> {dst}: {e:?}"));
+                    reply.call((
+                        ptr::null_mut(),
+                        Retained::as_ptr(&err(errno(&e))) as *mut NSError,
+                    ));
+                }
             }
         }
     }

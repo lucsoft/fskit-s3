@@ -209,3 +209,58 @@ async fn truncate_and_server_side_rename() {
         .await
         .expect("cleanup remove");
 }
+
+/// An editor's writability probe — Vim creates a *zero-byte* `4913` (then +123),
+/// then unlinks it — must round-trip as a **file**. The ext's `removeItem` decides
+/// file-delete vs. rmdir from `stat`'s kind when FSKit hands it no usable item, so
+/// a zero-byte object that ever stat'd as a directory would send the delete down
+/// the rmdir path and leak the probe. This locks the backend contract that fix
+/// leans on (the leak itself lived a layer up, in the FSKit glue).
+#[tokio::test]
+#[ignore = "requires a live S3 endpoint; set RUSTFS_ENDPOINT and run with --ignored"]
+async fn zero_byte_file_stats_as_file_and_deletes() {
+    let Some(b) = backend() else { return };
+    let path = unique_path("zero-byte-probe");
+
+    // Create but never write — a zero-byte object, exactly like the probe.
+    b.create(&path, EntryKind::File).await.expect("create");
+    let st = b.stat(&path).await.expect("stat zero-byte");
+    assert_eq!(
+        st.kind,
+        EntryKind::File,
+        "a zero-byte object must stat as a file, not a directory"
+    );
+    assert_eq!(st.size, 0, "the probe is empty");
+
+    b.remove(&path, EntryKind::File).await.expect("remove");
+    assert!(
+        matches!(b.stat(&path).await, Err(StorageError::NotFound)),
+        "the probe is gone after remove — no leak"
+    );
+}
+
+/// `mkdir` then `rmdir` — what macOS hits creating, then later clearing, the
+/// `.fseventsd` / `.Trashes` directories it writes to a mounted volume. The
+/// directory is an explicit prefix-marker object (RustFS stores it as
+/// `<name>__XLDIR__` on disk); `remove` must clear that marker so the directory
+/// truly disappears rather than lingering as an empty ghost.
+#[tokio::test]
+#[ignore = "requires a live S3 endpoint; set RUSTFS_ENDPOINT and run with --ignored"]
+async fn directory_marker_roundtrips() {
+    let Some(b) = backend() else { return };
+    let path = unique_path("dir-marker");
+
+    b.create(&path, EntryKind::Dir).await.expect("mkdir");
+    let st = b.stat(&path).await.expect("stat dir");
+    assert_eq!(
+        st.kind,
+        EntryKind::Dir,
+        "a created directory must stat as a directory"
+    );
+
+    b.remove(&path, EntryKind::Dir).await.expect("rmdir");
+    assert!(
+        matches!(b.stat(&path).await, Err(StorageError::NotFound)),
+        "the directory marker is cleared after remove"
+    );
+}
