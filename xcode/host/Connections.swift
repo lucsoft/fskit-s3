@@ -7,6 +7,20 @@
 //  NSAlerts; a mount that needs a secret opens the secret-prompt window instead.
 
 import SwiftUI
+import AppKit
+
+/// A coloured status dot for a menu row — a **non-template** tinted `NSImage`, so the
+/// menu renders it in colour (a symbol tinted with `.foregroundStyle` is treated as a
+/// template and comes out monochrome in a menu). Green filled = mounted, grey hollow
+/// = not.
+private func statusDot(mounted: Bool) -> NSImage {
+    let symbol = mounted ? "circle.fill" : "circle"
+    let color: NSColor = mounted ? .systemGreen : .tertiaryLabelColor
+    let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage()
+    let tinted = base.withSymbolConfiguration(.init(paletteColors: [color])) ?? base
+    tinted.isTemplate = false
+    return tinted
+}
 
 /// The "Connections" section: a titled group of per-connection submenus.
 struct ConnectionsMenu: View {
@@ -42,12 +56,10 @@ private struct ConnectionMenu: View {
                 }
             }
         } label: {
-            // A green filled dot when mounted, a hollow grey one when not.
             Label {
                 Text("\(connection.name)  (\(kindLabel(connection.kind)))")
             } icon: {
-                Image(systemName: mounted ? "circle.fill" : "circle")
-                    .foregroundStyle(mounted ? Color.green : Color.secondary)
+                Image(nsImage: statusDot(mounted: mounted))
             }
         }
     }
