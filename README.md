@@ -150,7 +150,9 @@ and never touches any existing mount.
 - [x] Write support: create / write / truncate / rename / remove (whole-object read-modify-write)
 - [x] "Test & Save" credential check runs off the main actor (no UI stall)
 - [x] Verified end-to-end on a signed build — write + S3 read paths (framework linking + reading the shared Keychain group from the `fskitd` sandbox)
+- [ ] Mount via s3:// URL scheme (custom URL handler in the app, which calls to configure connections that way)
 - [ ] More backends — WebDAV, SFTP (OpenDAL feature flag + constructor; trait and FSKit glue don't change)
+- [ ] LRU/LFU Cache Layer - Allow for hot files to be persistent on a local cache file. (dynamic cache size)
 - [ ] The Photos question — needs a block-device FSKit filesystem, not the unary one here; a separate track (see [`CLAUDE.md`](CLAUDE.md))
 
 ## License
