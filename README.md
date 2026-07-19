@@ -65,6 +65,13 @@ group that only the app can write — so `security add-generic-password` above
 suits your own CLI experiments; the app is what populates the shared item for a
 normal install.
 
+On an **unsigned dev build** the extension can't read that shared group at all, so
+the New/Edit Connection form also offers **Save secret to disk (dev)** — a `0600`
+plaintext file (`~/Library/Application Support/fskit-s3/secrets/<name>`) the app
+reads back and passes via `-o secret`, so one-click and launch mounts stop
+re-prompting. It's insecure (plaintext, and visible in `ps`/`mount` at mount time);
+signed installs should use the Keychain instead.
+
 ## How it works
 
 ```mermaid

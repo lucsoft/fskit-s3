@@ -475,6 +475,14 @@ public struct Connection {
      */
     public var saveSecretToKeychain: Bool
     /**
+     * Whether the secret (S3 only) is stored as a **plaintext file on disk** — the
+     * insecure dev fallback for unsigned builds where the extension can't read the
+     * shared Keychain group. When set, the app reads it back at mount and passes it
+     * via `-o secret`. Never the default; the secret itself lives in [`crate::disksecret`],
+     * not this struct or `connections.json`.
+     */
+    public var saveSecretToDisk: Bool
+    /**
      * Mount this connection automatically when the app launches.
      */
     public var mountOnLaunch: Bool
@@ -487,11 +495,19 @@ public struct Connection {
          * secret isn't persisted and a mount must supply it (prompt or `-o secret`).
          */saveSecretToKeychain: Bool, 
         /**
+         * Whether the secret (S3 only) is stored as a **plaintext file on disk** — the
+         * insecure dev fallback for unsigned builds where the extension can't read the
+         * shared Keychain group. When set, the app reads it back at mount and passes it
+         * via `-o secret`. Never the default; the secret itself lives in [`crate::disksecret`],
+         * not this struct or `connections.json`.
+         */saveSecretToDisk: Bool, 
+        /**
          * Mount this connection automatically when the app launches.
          */mountOnLaunch: Bool) {
         self.name = name
         self.kind = kind
         self.saveSecretToKeychain = saveSecretToKeychain
+        self.saveSecretToDisk = saveSecretToDisk
         self.mountOnLaunch = mountOnLaunch
     }
 }
@@ -509,6 +525,9 @@ extension Connection: Equatable, Hashable {
         if lhs.saveSecretToKeychain != rhs.saveSecretToKeychain {
             return false
         }
+        if lhs.saveSecretToDisk != rhs.saveSecretToDisk {
+            return false
+        }
         if lhs.mountOnLaunch != rhs.mountOnLaunch {
             return false
         }
@@ -519,6 +538,7 @@ extension Connection: Equatable, Hashable {
         hasher.combine(name)
         hasher.combine(kind)
         hasher.combine(saveSecretToKeychain)
+        hasher.combine(saveSecretToDisk)
         hasher.combine(mountOnLaunch)
     }
 }
@@ -534,6 +554,7 @@ public struct FfiConverterTypeConnection: FfiConverterRustBuffer {
                 name: FfiConverterString.read(from: &buf), 
                 kind: FfiConverterTypeConnectionKind.read(from: &buf), 
                 saveSecretToKeychain: FfiConverterBool.read(from: &buf), 
+                saveSecretToDisk: FfiConverterBool.read(from: &buf), 
                 mountOnLaunch: FfiConverterBool.read(from: &buf)
         )
     }
@@ -542,6 +563,7 @@ public struct FfiConverterTypeConnection: FfiConverterRustBuffer {
         FfiConverterString.write(value.name, into: &buf)
         FfiConverterTypeConnectionKind.write(value.kind, into: &buf)
         FfiConverterBool.write(value.saveSecretToKeychain, into: &buf)
+        FfiConverterBool.write(value.saveSecretToDisk, into: &buf)
         FfiConverterBool.write(value.mountOnLaunch, into: &buf)
     }
 }
@@ -575,11 +597,20 @@ public struct FormInput {
     public var secret: String
     public var sessionToken: String
     public var saveSecretToKeychain: Bool
+    /**
+     * Store the secret as a dev-only plaintext file on disk (see
+     * [`Connection::save_secret_to_disk`]). Insecure; for unsigned builds.
+     */
+    public var saveSecretToDisk: Bool
     public var mountOnLaunch: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(name: String, isS3: Bool, endpoint: String, bucket: String, region: String, accessKeyId: String, secret: String, sessionToken: String, saveSecretToKeychain: Bool, mountOnLaunch: Bool) {
+    public init(name: String, isS3: Bool, endpoint: String, bucket: String, region: String, accessKeyId: String, secret: String, sessionToken: String, saveSecretToKeychain: Bool, 
+        /**
+         * Store the secret as a dev-only plaintext file on disk (see
+         * [`Connection::save_secret_to_disk`]). Insecure; for unsigned builds.
+         */saveSecretToDisk: Bool, mountOnLaunch: Bool) {
         self.name = name
         self.isS3 = isS3
         self.endpoint = endpoint
@@ -589,6 +620,7 @@ public struct FormInput {
         self.secret = secret
         self.sessionToken = sessionToken
         self.saveSecretToKeychain = saveSecretToKeychain
+        self.saveSecretToDisk = saveSecretToDisk
         self.mountOnLaunch = mountOnLaunch
     }
 }
@@ -624,6 +656,9 @@ extension FormInput: Equatable, Hashable {
         if lhs.saveSecretToKeychain != rhs.saveSecretToKeychain {
             return false
         }
+        if lhs.saveSecretToDisk != rhs.saveSecretToDisk {
+            return false
+        }
         if lhs.mountOnLaunch != rhs.mountOnLaunch {
             return false
         }
@@ -640,6 +675,7 @@ extension FormInput: Equatable, Hashable {
         hasher.combine(secret)
         hasher.combine(sessionToken)
         hasher.combine(saveSecretToKeychain)
+        hasher.combine(saveSecretToDisk)
         hasher.combine(mountOnLaunch)
     }
 }
@@ -661,6 +697,7 @@ public struct FfiConverterTypeFormInput: FfiConverterRustBuffer {
                 secret: FfiConverterString.read(from: &buf), 
                 sessionToken: FfiConverterString.read(from: &buf), 
                 saveSecretToKeychain: FfiConverterBool.read(from: &buf), 
+                saveSecretToDisk: FfiConverterBool.read(from: &buf), 
                 mountOnLaunch: FfiConverterBool.read(from: &buf)
         )
     }
@@ -675,6 +712,7 @@ public struct FfiConverterTypeFormInput: FfiConverterRustBuffer {
         FfiConverterString.write(value.secret, into: &buf)
         FfiConverterString.write(value.sessionToken, into: &buf)
         FfiConverterBool.write(value.saveSecretToKeychain, into: &buf)
+        FfiConverterBool.write(value.saveSecretToDisk, into: &buf)
         FfiConverterBool.write(value.mountOnLaunch, into: &buf)
     }
 }
@@ -1531,8 +1569,9 @@ public func enableAutostart() {try! rustCall() {
 }
 }
 /**
- * Whether a connection currently has a stored secret (shared Keychain group, then
- * the default keychain). Used to pre-decide whether mounting will need a prompt.
+ * Whether a connection currently has a stored secret — the Keychain (shared group,
+ * then default) or the dev-only on-disk file. Used to pre-decide whether mounting
+ * will need a prompt.
  */
 public func hasSecret(name: String) -> Bool {
     return try!  FfiConverterBool.lift(try! rustCall() {
@@ -1561,11 +1600,12 @@ public func listFskitMounts() -> [Mount] {
 })
 }
 /**
- * Mount a saved connection using its stored secret (the ext reads `Keychain[name]`
- * — no `-o secret` on the command line). An S3 connection with no usable secret
- * raises [`FfiError::NeedsSecret`], and a mount that the extension rejects for a
- * missing/unreadable secret is mapped to the same — so the UI can prompt. Other
- * failures come back as [`FfiError::Message`] with a specific, actionable hint.
+ * Mount a saved connection using its stored secret. A Keychain-stored secret is
+ * read by the extension itself (no `-o secret` on the command line); the dev-only
+ * on-disk plaintext secret is read here and passed via `-o secret`. An S3 connection
+ * with no usable secret raises [`FfiError::NeedsSecret`], and a mount the extension
+ * rejects for a missing/unreadable secret is mapped to the same — so the UI can
+ * prompt. Other failures come back as [`FfiError::Message`] with an actionable hint.
  */
 public func mountConnection(name: String)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
     uniffi_fskit_s3_app_fn_func_mount_connection(
@@ -1585,21 +1625,25 @@ public func mountPointFor(name: String) -> String {
 })
 }
 /**
- * Mount an S3 connection with a secret supplied now (the prompt path): store it in
- * the Keychain first when asked, then mount with `-o secret` (the insecure path,
- * for when the ext can't read the shared Keychain on an unsigned build).
+ * Mount an S3 connection with a secret supplied now (the prompt path): persist it
+ * first when asked — to the Keychain (secure) and/or the dev-only on-disk plaintext
+ * file — then mount with `-o secret` (the insecure path, for when the ext can't read
+ * the shared Keychain on an unsigned build). Persisting to disk is what lets a later
+ * one-click or launch mount reuse the secret on an unsigned build without re-typing.
  */
-public func mountWithSecret(name: String, secret: String, saveToKeychain: Bool)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
+public func mountWithSecret(name: String, secret: String, saveToKeychain: Bool, saveToDisk: Bool)throws  {try rustCallWithError(FfiConverterTypeFfiError.lift) {
     uniffi_fskit_s3_app_fn_func_mount_with_secret(
         FfiConverterString.lower(name),
         FfiConverterString.lower(secret),
-        FfiConverterBool.lower(saveToKeychain),$0
+        FfiConverterBool.lower(saveToKeychain),
+        FfiConverterBool.lower(saveToDisk),$0
     )
 }
 }
 /**
- * The stored secret for a connection, if any — only to pre-fill the edit form so
- * an S3 connection needn't have its secret re-typed. Never persisted by Swift.
+ * The stored secret for a connection, if any (Keychain first, then the dev on-disk
+ * file) — only to pre-fill the edit form so an S3 connection needn't have its secret
+ * re-typed. Never persisted by Swift.
  */
 public func readSecret(name: String) -> String? {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
@@ -1697,7 +1741,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_fskit_s3_app_checksum_func_enable_autostart() != 50413) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_fskit_s3_app_checksum_func_has_secret() != 6545) {
+    if (uniffi_fskit_s3_app_checksum_func_has_secret() != 41829) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_fskit_s3_app_checksum_func_list_connections() != 11767) {
@@ -1706,16 +1750,16 @@ private var initializationResult: InitializationResult = {
     if (uniffi_fskit_s3_app_checksum_func_list_fskit_mounts() != 32366) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_fskit_s3_app_checksum_func_mount_connection() != 27487) {
+    if (uniffi_fskit_s3_app_checksum_func_mount_connection() != 60477) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_fskit_s3_app_checksum_func_mount_point_for() != 62724) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_fskit_s3_app_checksum_func_mount_with_secret() != 34613) {
+    if (uniffi_fskit_s3_app_checksum_func_mount_with_secret() != 45662) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_fskit_s3_app_checksum_func_read_secret() != 52826) {
+    if (uniffi_fskit_s3_app_checksum_func_read_secret() != 59672) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_fskit_s3_app_checksum_func_save_connection() != 8212) {

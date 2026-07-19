@@ -6,6 +6,8 @@
 //! - [`connection`] — the `Connection`/`ConnectionKind` (`Memory` / `S3`) model +
 //!   the persisted `Registry` (`connections.json`, never holding a secret).
 //! - [`keychain`] — the S3 secret in the macOS Keychain (secure path).
+//! - [`disksecret`] — a dev-only **plaintext** secret file, for unsigned builds
+//!   where the extension can't read the shared Keychain group (insecure, opt-in).
 //! - [`s3check`] — the "Test and Save" credential check (lists the bucket).
 //! - [`mounts`] — the mount table + `mount`/`unmount`. No bespoke CLI: mounting is
 //!   the system `mount` tool with the connection's config.
@@ -32,6 +34,7 @@
 
 mod autostart;
 mod connection;
+mod disksecret;
 mod ffi;
 mod health;
 mod keychain;

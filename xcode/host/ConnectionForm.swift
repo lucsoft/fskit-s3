@@ -27,6 +27,7 @@ struct ConnectionFormView: View {
     @State private var secret = ""
     @State private var sessionToken = ""
     @State private var saveToKeychain = false
+    @State private var saveToDisk = false
     @State private var mountOnLaunch = false
 
     @State private var status = ""
@@ -52,11 +53,15 @@ struct ConnectionFormView: View {
                         TextField("Endpoint", text: $endpoint,
                                   prompt: Text("https://s3.example.com"))
                         TextField("Bucket", text: $bucket, prompt: Text("Required"))
-                        TextField("Region", text: $region, prompt: Text("auto"))
+                        TextField("Region", text: $region, prompt: Text("us-east-1"))
                         TextField("Access Key ID", text: $accessKeyId, prompt: Text("Required"))
                         SecureField("Secret", text: $secret, prompt: Text("Required"))
                         TextField("Session token", text: $sessionToken, prompt: Text("Optional"))
                         Toggle("Save secret to Keychain", isOn: $saveToKeychain)
+                        Toggle(isOn: $saveToDisk) {
+                            Text("Save secret to disk (dev)")
+                            Text("Plaintext, for unsigned builds where the extension can't read the Keychain. Insecure — the secret is stored in the clear.")
+                        }
                     }
                 }
 
@@ -112,6 +117,7 @@ struct ConnectionFormView: View {
         guard let connection else { return }
         name = connection.name
         saveToKeychain = connection.saveSecretToKeychain
+        saveToDisk = connection.saveSecretToDisk
         mountOnLaunch = connection.mountOnLaunch
         if case .s3(let meta) = connection.kind {
             isS3 = true
@@ -128,7 +134,8 @@ struct ConnectionFormView: View {
         FormInput(
             name: name, isS3: isS3, endpoint: endpoint, bucket: bucket, region: region,
             accessKeyId: accessKeyId, secret: secret, sessionToken: sessionToken,
-            saveSecretToKeychain: saveToKeychain, mountOnLaunch: mountOnLaunch)
+            saveSecretToKeychain: saveToKeychain, saveSecretToDisk: saveToDisk,
+            mountOnLaunch: mountOnLaunch)
     }
 
     private func save() {
@@ -187,6 +194,7 @@ struct SecretPromptView: View {
 
     @State private var secret = ""
     @State private var saveToKeychain = true
+    @State private var saveToDisk = false
     @State private var status = ""
     @State private var busy = false
 
@@ -198,6 +206,10 @@ struct SecretPromptView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     SecureField("Secret access key", text: $secret)
                     Toggle("Save to Keychain", isOn: $saveToKeychain)
+                    Toggle(isOn: $saveToDisk) {
+                        Text("Save to disk (dev)")
+                        Text("Plaintext fallback for unsigned builds. Insecure.")
+                    }
                 }
                 if !status.isEmpty {
                     Section {
@@ -238,10 +250,13 @@ struct SecretPromptView: View {
         status = ""
         let enteredSecret = secret
         let save = saveToKeychain
+        let saveDisk = saveToDisk
         Task {
             do {
                 try await Task.detached {
-                    try mountWithSecret(name: name, secret: enteredSecret, saveToKeychain: save)
+                    try mountWithSecret(
+                        name: name, secret: enteredSecret,
+                        saveToKeychain: save, saveToDisk: saveDisk)
                 }.value
                 await model.refreshConnections()
                 dismiss()

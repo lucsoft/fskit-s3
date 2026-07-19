@@ -169,6 +169,14 @@ prefix).
   - `keychain.rs` — the S3 secret in the Keychain (`security-framework`),
     preferring a **shared access group** the extension can read (falls back to the
     default keychain when unsigned).
+  - `disksecret.rs` — a **dev-only, insecure** alternative to the Keychain: the
+    secret as a `0600` **plaintext** file (`~/Library/Application Support/fskit-s3/
+    secrets/<name>`, beside but never inside `connections.json`). For unsigned builds
+    where the extension can't read the shared Keychain group; opt-in per connection
+    (`save_secret_to_disk`). The app reads it back at mount and hands it to the ext
+    via `-o secret` — no extension changes, so the secret still rides the command
+    line (visible in `ps`/`mount`); the win is that one-click and launch mounts stop
+    re-prompting. `ffi::secret_plan` resolves Keychain-first, then this file.
   - `s3check.rs` — the "Test and Save" credential check (lists the bucket via
     `fskit-s3-backend`/OpenDAL, the same backend the extension serves with).
   - `mounts.rs` — the mount table + `mount`/`unmount` (`mount -F -t fskit-s3
@@ -293,7 +301,11 @@ the non-secret config rides the **source path** and the extension resolves the
 **secret** as `Keychain[name]` (the secure default, via a shared keychain access
 group) **else** an `-o secret` (insecure, visible in `ps`/`mount`). The extension is
 a **headless** app extension and can't prompt, so the *app* prompts for a missing
-secret. The
+secret. On an **unsigned dev build** the extension can't read the shared Keychain at
+all, so the app offers a **plaintext on-disk** secret (`disksecret.rs`,
+`save_secret_to_disk`): the *app* reads it back and supplies it via that same `-o
+secret`, so one-click and launch mounts stop re-prompting. It's insecure and opt-in —
+for real installs the Keychain path is the default. The
 config file never stores the secret. Sharing the Keychain item needs a signed
 build + the `keychain-access-groups` entitlement on both targets (see
 `xcode/README.md`).

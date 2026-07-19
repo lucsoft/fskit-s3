@@ -17,7 +17,33 @@
 use crate::connection::{self, Connection, ConnectionKind, FormInput, Registry, S3Meta};
 use crate::health::Report;
 use crate::mounts::{self, Mount};
-use crate::{keychain, s3check};
+use crate::{disksecret, keychain, s3check};
+
+/// How a connection's S3 secret reaches the extension for a mount.
+///
+/// Resolved by [`secret_plan`]: the Keychain is the secure default (the extension
+/// reads it itself, so nothing goes on the command line); the dev-only on-disk
+/// plaintext file is the fallback (the app reads it and passes `-o secret`, since an
+/// unsigned extension can't read the shared Keychain group).
+enum SecretPlan {
+    /// In the shared Keychain — mount with `secret = None` (the ext reads it).
+    Keychain,
+    /// On disk (dev, plaintext) — mount with `-o secret` carrying this value.
+    Disk(String),
+    /// No secret available anywhere — the caller must prompt / skip.
+    Missing,
+}
+
+/// Where a connection's secret is (Keychain first, then the dev on-disk file).
+fn secret_plan(name: &str) -> SecretPlan {
+    if keychain::read_secret(name).is_some() {
+        SecretPlan::Keychain
+    } else if let Some(secret) = disksecret::read(name) {
+        SecretPlan::Disk(secret)
+    } else {
+        SecretPlan::Missing
+    }
+}
 
 /// The error every fallible contract call surfaces to Swift. UniFFI turns it into
 /// a Swift `Error`; the SwiftUI layer switches on the variant.
@@ -92,18 +118,20 @@ pub fn mount_point_for(name: String) -> String {
         .into_owned()
 }
 
-/// Whether a connection currently has a stored secret (shared Keychain group, then
-/// the default keychain). Used to pre-decide whether mounting will need a prompt.
+/// Whether a connection currently has a stored secret — the Keychain (shared group,
+/// then default) or the dev-only on-disk file. Used to pre-decide whether mounting
+/// will need a prompt.
 #[uniffi::export]
 pub fn has_secret(name: String) -> bool {
-    keychain::read_secret(&name).is_some()
+    keychain::read_secret(&name).is_some() || disksecret::read(&name).is_some()
 }
 
-/// The stored secret for a connection, if any — only to pre-fill the edit form so
-/// an S3 connection needn't have its secret re-typed. Never persisted by Swift.
+/// The stored secret for a connection, if any (Keychain first, then the dev on-disk
+/// file) — only to pre-fill the edit form so an S3 connection needn't have its secret
+/// re-typed. Never persisted by Swift.
 #[uniffi::export]
 pub fn read_secret(name: String) -> Option<String> {
-    keychain::read_secret(&name)
+    keychain::read_secret(&name).or_else(|| disksecret::read(&name))
 }
 
 /// Validate raw form values into a [`Connection`] **without** any network or
@@ -123,9 +151,10 @@ pub fn save_connection(
     form: FormInput,
     original_name: Option<String>,
 ) -> Result<Connection, FfiError> {
-    // Keep what the live check + Keychain need before `from_form` consumes `form`.
+    // Keep what the live check + secret storage need before `from_form` consumes `form`.
     let secret = form.secret.clone();
     let save_keychain = form.save_secret_to_keychain;
+    let save_disk = form.save_secret_to_disk;
 
     let conn = Connection::from_form(form).map_err(FfiError::from)?;
 
@@ -135,6 +164,15 @@ pub fn save_connection(
         if save_keychain {
             keychain::store_secret(&conn.name, &secret)
                 .map_err(|e| FfiError::from(format!("Keychain save failed: {e}")))?;
+        }
+        // Dev-only plaintext fallback (unsigned builds the ext can't read the
+        // Keychain from). Written when asked; cleared otherwise so an un-ticked box
+        // removes a stale file left by a previous save.
+        if save_disk {
+            disksecret::store(&conn.name, &secret)
+                .map_err(|e| FfiError::from(format!("Disk secret save failed: {e}")))?;
+        } else {
+            disksecret::delete(&conn.name);
         }
     }
 
@@ -183,6 +221,7 @@ pub fn delete_connection(name: String) -> Result<(), FfiError> {
         .save()
         .map_err(|e| FfiError::from(format!("Delete failed: {e}")))?;
     keychain::delete_secret(&name);
+    disksecret::delete(&name);
     Ok(())
 }
 
@@ -201,34 +240,44 @@ pub fn list_fskit_mounts() -> Vec<Mount> {
     mounts::list_fskit()
 }
 
-/// Mount a saved connection using its stored secret (the ext reads `Keychain[name]`
-/// — no `-o secret` on the command line). An S3 connection with no usable secret
-/// raises [`FfiError::NeedsSecret`], and a mount that the extension rejects for a
-/// missing/unreadable secret is mapped to the same — so the UI can prompt. Other
-/// failures come back as [`FfiError::Message`] with a specific, actionable hint.
+/// Mount a saved connection using its stored secret. A Keychain-stored secret is
+/// read by the extension itself (no `-o secret` on the command line); the dev-only
+/// on-disk plaintext secret is read here and passed via `-o secret`. An S3 connection
+/// with no usable secret raises [`FfiError::NeedsSecret`], and a mount the extension
+/// rejects for a missing/unreadable secret is mapped to the same — so the UI can
+/// prompt. Other failures come back as [`FfiError::Message`] with an actionable hint.
 #[uniffi::export]
 pub fn mount_connection(name: String) -> Result<(), FfiError> {
     let registry = Registry::load();
     let Some(conn) = registry.get(&name) else {
         return Err(FfiError::from(format!("No connection named {name:?}.")));
     };
-    if conn.is_s3() && keychain::read_secret(&name).is_none() {
-        return Err(FfiError::NeedsSecret);
-    }
-    match mounts::mount(conn, &conn.default_mount_point(), None) {
+    let secret = if conn.is_s3() {
+        match secret_plan(&name) {
+            SecretPlan::Missing => return Err(FfiError::NeedsSecret),
+            SecretPlan::Keychain => None,
+            SecretPlan::Disk(s) => Some(s),
+        }
+    } else {
+        None
+    };
+    match mounts::mount(conn, &conn.default_mount_point(), secret.as_deref()) {
         Ok(()) => Ok(()),
         Err(e) => Err(mount_error(&e, conn.is_s3())),
     }
 }
 
-/// Mount an S3 connection with a secret supplied now (the prompt path): store it in
-/// the Keychain first when asked, then mount with `-o secret` (the insecure path,
-/// for when the ext can't read the shared Keychain on an unsigned build).
+/// Mount an S3 connection with a secret supplied now (the prompt path): persist it
+/// first when asked — to the Keychain (secure) and/or the dev-only on-disk plaintext
+/// file — then mount with `-o secret` (the insecure path, for when the ext can't read
+/// the shared Keychain on an unsigned build). Persisting to disk is what lets a later
+/// one-click or launch mount reuse the secret on an unsigned build without re-typing.
 #[uniffi::export]
 pub fn mount_with_secret(
     name: String,
     secret: String,
     save_to_keychain: bool,
+    save_to_disk: bool,
 ) -> Result<(), FfiError> {
     let registry = Registry::load();
     let Some(conn) = registry.get(&name) else {
@@ -237,6 +286,10 @@ pub fn mount_with_secret(
     if save_to_keychain {
         // Best-effort — the mount can still proceed via `-o secret` if this fails.
         let _ = keychain::store_secret(&name, &secret);
+    }
+    if save_to_disk {
+        // Best-effort likewise; the mount below carries the secret regardless.
+        let _ = disksecret::store(&name, &secret);
     }
     mounts::mount(conn, &conn.default_mount_point(), Some(&secret))
         .map_err(|e| mount_error(&e, conn.is_s3()))
@@ -259,10 +312,17 @@ pub fn auto_mount_on_launch() -> Vec<String> {
         if !conn.mount_on_launch {
             continue;
         }
-        if conn.is_s3() && keychain::read_secret(&conn.name).is_none() {
-            continue;
-        }
-        if mounts::mount(conn, &conn.default_mount_point(), None).is_err() {
+        let secret = if conn.is_s3() {
+            match secret_plan(&conn.name) {
+                // No secret to mount with unattended (a prompt can't run at launch).
+                SecretPlan::Missing => continue,
+                SecretPlan::Keychain => None,
+                SecretPlan::Disk(s) => Some(s),
+            }
+        } else {
+            None
+        };
+        if mounts::mount(conn, &conn.default_mount_point(), secret.as_deref()).is_err() {
             failed.push(conn.name.clone());
         }
     }

@@ -309,7 +309,7 @@ RustBuffer uniffi_fskit_s3_app_fn_func_mount_point_for(RustBuffer name, RustCall
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_MOUNT_WITH_SECRET
 #define UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_MOUNT_WITH_SECRET
-void uniffi_fskit_s3_app_fn_func_mount_with_secret(RustBuffer name, RustBuffer secret, int8_t save_to_keychain, RustCallStatus *_Nonnull out_status
+void uniffi_fskit_s3_app_fn_func_mount_with_secret(RustBuffer name, RustBuffer secret, int8_t save_to_keychain, int8_t save_to_disk, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FSKIT_S3_APP_FN_FUNC_READ_SECRET

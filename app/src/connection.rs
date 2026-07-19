@@ -23,6 +23,13 @@ pub struct Connection {
     /// secret isn't persisted and a mount must supply it (prompt or `-o secret`).
     #[serde(default)]
     pub save_secret_to_keychain: bool,
+    /// Whether the secret (S3 only) is stored as a **plaintext file on disk** — the
+    /// insecure dev fallback for unsigned builds where the extension can't read the
+    /// shared Keychain group. When set, the app reads it back at mount and passes it
+    /// via `-o secret`. Never the default; the secret itself lives in [`crate::disksecret`],
+    /// not this struct or `connections.json`.
+    #[serde(default)]
+    pub save_secret_to_disk: bool,
     /// Mount this connection automatically when the app launches.
     #[serde(default)]
     pub mount_on_launch: bool,
@@ -56,6 +63,7 @@ impl Connection {
             name: "memory".to_string(),
             kind: ConnectionKind::Memory,
             save_secret_to_keychain: false,
+            save_secret_to_disk: false,
             mount_on_launch: false,
         }
     }
@@ -134,6 +142,7 @@ impl Connection {
                 name: name.to_string(),
                 kind: ConnectionKind::Memory,
                 save_secret_to_keychain: false,
+                save_secret_to_disk: false,
                 mount_on_launch: input.mount_on_launch,
             });
         }
@@ -154,9 +163,17 @@ impl Connection {
         if secret.is_empty() {
             return Err("Secret Access Key is required for an S3 connection.".to_string());
         }
-        // OpenDAL requires a region; without one the backend fails to build with a
-        // terse "ConfigInvalid". Real AWS needs the correct region; most S3-compatible
-        // stores (MinIO, RustFS, R2) ignore the value but still need it non-empty.
+        // Region is required. OpenDAL's S3 `build()` errors `ConfigInvalid` when the
+        // region is empty *and* it can't be found in the ambient AWS environment
+        // (`AWS_REGION`, `~/.aws/config`) — and it never auto-detects at build time
+        // (that's a separate explicit `S3::detect_region()` network call we don't
+        // make). We can't lean on that ambient fallback either: "Test & Save" runs in
+        // this app, but the real mount runs in the *sandboxed* extension under fskitd,
+        // which sees neither your shell env nor `~/.aws/config` — so a blank region
+        // could pass the test and then fail the mount. Requiring it explicitly makes
+        // the two agree. Real AWS needs the correct value; S3-compatible stores (MinIO,
+        // RustFS, R2) ignore it but still need it non-empty (`us-east-1` is the usual
+        // placeholder).
         if region.is_empty() {
             return Err("Region is required for S3 (e.g. us-east-1).".to_string());
         }
@@ -177,8 +194,9 @@ impl Connection {
                 return Err(format!("{label} can't contain '{bad}'."));
             }
         }
-        // The secret still rides `-o secret=…` when it isn't saved to the Keychain,
-        // so it must avoid the `-o` list's comma delimiter.
+        // The secret rides `-o secret=…` unless it's saved to the Keychain (a
+        // disk-stored secret is read back and passed via `-o` too), so in every
+        // non-Keychain case it must avoid the `-o` list's comma delimiter.
         if !input.save_secret_to_keychain && secret.contains(',') {
             return Err(
                 "Secret can't contain a comma unless it's saved to the Keychain.".to_string(),
@@ -195,6 +213,7 @@ impl Connection {
                 session_token: (!session_token.is_empty()).then(|| session_token.to_string()),
             }),
             save_secret_to_keychain: input.save_secret_to_keychain,
+            save_secret_to_disk: input.save_secret_to_disk,
             mount_on_launch: input.mount_on_launch,
         })
     }
@@ -212,6 +231,9 @@ pub struct FormInput {
     pub secret: String,
     pub session_token: String,
     pub save_secret_to_keychain: bool,
+    /// Store the secret as a dev-only plaintext file on disk (see
+    /// [`Connection::save_secret_to_disk`]). Insecure; for unsigned builds.
+    pub save_secret_to_disk: bool,
     pub mount_on_launch: bool,
 }
 
@@ -356,6 +378,7 @@ mod tests {
                 session_token: None,
             }),
             save_secret_to_keychain: true,
+            save_secret_to_disk: false,
             mount_on_launch: false,
         }
     }
@@ -372,6 +395,7 @@ mod tests {
             secret: "s3cr3t".to_string(),
             session_token: String::new(),
             save_secret_to_keychain: true,
+            save_secret_to_disk: false,
             mount_on_launch: false,
         }
     }
@@ -390,6 +414,20 @@ mod tests {
         let s3 = Connection::from_form(s3_form()).unwrap();
         assert!(s3.is_s3());
         assert!(s3.save_secret_to_keychain);
+        assert!(!s3.save_secret_to_disk);
+    }
+
+    #[test]
+    fn from_form_carries_save_secret_to_disk() {
+        // The dev-only disk flag flows through unchanged, independent of Keychain.
+        let disk = Connection::from_form(FormInput {
+            save_secret_to_keychain: false,
+            save_secret_to_disk: true,
+            ..s3_form()
+        })
+        .unwrap();
+        assert!(disk.save_secret_to_disk);
+        assert!(!disk.save_secret_to_keychain);
     }
 
     #[test]
