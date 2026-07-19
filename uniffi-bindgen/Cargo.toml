@@ -1,0 +1,21 @@
+# The UniFFI binding generator, as its own tiny binary crate.
+#
+# It's kept separate from `fskit-s3-app` on purpose: the `cli` feature pulls in
+# clap and the whole bindgen, which we don't want compiled into the app staticlib
+# that ships in the signed bundle. Library-mode bindgen reads the contract's
+# metadata back out of the *built* app library (a dylib), so this binary needs no
+# dependency on the app crate at all — just a matching `uniffi` version (pinned in
+# the workspace) so the metadata formats agree.
+[package]
+name = "uniffi-bindgen"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "main.rs"
+
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }

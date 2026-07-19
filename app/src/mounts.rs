@@ -15,7 +15,7 @@ use crate::connection::Connection;
 pub const FS_TYPE: &str = "fskit-s3";
 
 /// One row of `/sbin/mount`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Mount {
     pub device: String,
     pub mount_point: String,

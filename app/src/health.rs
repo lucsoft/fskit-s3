@@ -35,7 +35,7 @@ const SHA_KEY: &str = "FSKitS3GitSHA";
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether our module is installed with FSKit and enabled by the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum Health {
     /// FSKit has no record of our module yet (not registered, or still settling).
     NotInstalled,
@@ -55,7 +55,7 @@ impl Health {
 }
 
 /// How the build FSKit will launch compares to the one this app ships.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum Freshness {
     /// Not determinable (a pre-SHA build, or health couldn't be read).
     Unknown,
@@ -67,7 +67,7 @@ pub enum Freshness {
 }
 
 /// The result of a health check: install/enable state + build freshness.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Report {
     pub health: Health,
     pub freshness: Freshness,

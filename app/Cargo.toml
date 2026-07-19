@@ -22,7 +22,11 @@ path = "src/main.rs"
 [lib]
 name = "fskit_s3_app"
 path = "src/lib.rs"
-crate-type = ["staticlib", "rlib"]
+# `staticlib` is what the Xcode host target links; `rlib` keeps the `cargo run`
+# binary building; `cdylib` exists only so `uniffi-bindgen` can read the contract's
+# metadata back out of a built dynamic library (library-mode generation). The
+# bundle never ships the dylib.
+crate-type = ["staticlib", "rlib", "cdylib"]
 
 [dependencies]
 # Connection persistence: the app-local connections.json (never holds secrets).
@@ -38,6 +42,12 @@ security-framework = "3"
 fskit-s3-core = { workspace = true }
 fskit-s3-backend = { workspace = true }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread"] }
+
+# UniFFI: the typed Rust↔Swift contract. The `#[uniffi::export]` functions +
+# `#[derive(uniffi::Record/Enum/Error)]` types in `ffi.rs` compile a scaffolding
+# into this library; `uniffi-bindgen` (the sibling crate) reads it and emits the
+# Swift bindings the SwiftUI app calls. Proc-macro-only mode — no UDL, no build.rs.
+uniffi = { workspace = true }
 
 # The objc2 crates gate every class behind a like-named feature, and their
 # `default` turns the *whole* framework on. We disable defaults and re-enable only

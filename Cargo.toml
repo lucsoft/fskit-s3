@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "backend", "app", "ext"]
+members = ["core", "backend", "app", "ext", "uniffi-bindgen"]
 
 [workspace.package]
 edition = "2021"
@@ -10,3 +10,8 @@ repository = "https://github.com/lucsoft/fskit-s3"
 [workspace.dependencies]
 fskit-s3-core = { path = "core" }
 fskit-s3-backend = { path = "backend" }
+# The Rust↔Swift contract generator. Pinned once here so the app crate (which
+# embeds the scaffolding) and the `uniffi-bindgen` binary (which reads it back out
+# of the built library) always agree on the metadata format — a version skew makes
+# bindgen reject the library.
+uniffi = { version = "0.28", default-features = false }

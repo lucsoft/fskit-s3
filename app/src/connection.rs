@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// A configured storage connection: an identity, the backend it maps to, and how
 /// it should be mounted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct Connection {
     pub name: String,
     pub kind: ConnectionKind,
@@ -29,7 +29,7 @@ pub struct Connection {
 }
 
 /// Which backend a connection is served by.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum ConnectionKind {
     /// The credential-free in-memory demo tree the extension serves.
     Memory,
@@ -39,7 +39,7 @@ pub enum ConnectionKind {
 
 /// Non-secret S3 connection config (mirrors `fskit_s3_backend::S3Config` minus the
 /// `secret_access_key`, which never touches this struct or the config file).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, uniffi::Record)]
 pub struct S3Meta {
     pub bucket: String,
     pub region: String,
@@ -82,7 +82,7 @@ impl Connection {
     /// options), so the mount point serves as its own resource. It's distinct
     /// per connection, so FSKit container identities don't collide.
     pub fn default_mount_point(&self) -> PathBuf {
-        base_dir().join(&self.name)
+        default_mount_point_for(&self.name)
     }
 
     /// The **source path** handed to `mount` — the connection's config, made
@@ -211,6 +211,7 @@ impl Connection {
 }
 
 /// Raw values from the Add-mount form, validated by [`Connection::from_form`].
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct FormInput {
     pub name: String,
     pub is_s3: bool,
@@ -321,6 +322,13 @@ impl Registry {
         self.connections.retain(|c| c.name != name);
         self.connections.len() != before
     }
+}
+
+/// The default mount point for a connection named `name` (`~/fskit-s3/<name>`).
+/// Standalone (not a method) so the contract can resolve it from a name alone —
+/// the SwiftUI menu joins connections to the live mount list by this path.
+pub fn default_mount_point_for(name: &str) -> PathBuf {
+    base_dir().join(name)
 }
 
 /// The base directory for fskit-s3's mount points and resource dirs

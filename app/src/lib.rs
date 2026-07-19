@@ -37,11 +37,17 @@ mod appkit;
 mod autostart;
 mod connection;
 mod devlog;
+mod ffi;
 mod health;
 mod healthwindow;
 mod keychain;
 mod mounts;
 mod s3check;
+
+// The UniFFI scaffolding for the Rust↔Swift contract declared in `ffi.rs`. This
+// macro emits the FFI shims + the metadata `uniffi-bindgen` reads to generate the
+// Swift bindings. Proc-macro (UDL-less) mode, so no `.udl` and no build.rs.
+uniffi::setup_scaffolding!();
 
 use connection::Registry;
 use objc2::rc::Retained;

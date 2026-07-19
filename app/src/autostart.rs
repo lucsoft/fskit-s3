@@ -14,7 +14,7 @@ use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 
 /// `SMAppServiceStatus` (`SMAppService.h`): the registration state of a service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum Status {
     /// Not registered with ServiceManagement (the initial state, or after unregister).
     NotRegistered,
