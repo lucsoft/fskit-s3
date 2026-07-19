@@ -35,15 +35,21 @@ pub struct VolumeIvars {
     backend: OnceLock<Arc<dyn StorageBackend>>,
     pending: Mutex<Option<HashMap<String, String>>>,
     rt: Runtime,
-    /// Per-directory "last changed through this mount" time, bumped whenever a
-    /// create/remove/rename alters a directory's contents. Object stores keep no
+    /// Per-directory POSIX mtime — the last time a directory's **entry list** changed
+    /// through this mount (a create/remove/rename under it). Object stores keep no
     /// directory mtime, so without this a directory's reported time never moves and
     /// macOS keeps serving a **stale cached listing** — a just-deleted file lingers
-    /// in `ls`, a just-created one is missing. Surfacing a time that advances on
-    /// change (and, from it, a fresh enumeration verifier) is the signal that makes
-    /// the kernel re-enumerate. A missing entry means "never changed here" → the
-    /// process-stable fallback, so unchanged directories still report a constant.
+    /// in `ls`, a just-created one is missing. This only bumps on structural changes,
+    /// matching POSIX (a file *update* doesn't touch its directory's mtime). A missing
+    /// entry means "never changed here" → the process-stable fallback.
     dir_mtimes: Mutex<HashMap<String, std::time::SystemTime>>,
+    /// Per-directory enumeration **generation** — bumped whenever *anything* in the
+    /// directory's enumeration changes: the entry list (create/remove/rename) **and**
+    /// a child's packed size/mtime (write/truncate). It drives the enumeration
+    /// verifier, decoupled from the POSIX mtime above: a file update must refresh the
+    /// cached listing (so Finder's size column isn't stale) without moving the
+    /// directory's mtime. A missing entry is generation 0.
+    dir_versions: Mutex<HashMap<String, u64>>,
 }
 
 define_class!(
@@ -372,6 +378,9 @@ define_class!(
                     ));
                     return;
                 }
+                // The child's size changed → refresh the parent's cached listing
+                // (its packed attributes), without moving the dir mtime.
+                self.touch_dir_child(corepath::parent(item.path()));
             }
             let fresh = self.fresh_attributes(item);
             reply.call((
@@ -659,7 +668,12 @@ define_class!(
                 .block_on(backend.write(item.path(), offset.max(0) as u64, &data))
             {
                 // The backend writes the whole slice or errors; report all `len`.
-                Ok(()) => reply.call((len, ptr::null_mut())),
+                Ok(()) => {
+                    // The child's size/mtime changed → refresh the parent's cached
+                    // listing (its packed attributes), without moving the dir mtime.
+                    self.touch_dir_child(corepath::parent(item.path()));
+                    reply.call((len, ptr::null_mut()))
+                }
                 Err(e) => reply.call((0, Retained::as_ptr(&err(errno(&e))) as *mut NSError)),
             }
         }
@@ -675,6 +689,7 @@ impl S3Volume {
             pending: Mutex::new(None),
             rt,
             dir_mtimes: Mutex::new(HashMap::new()),
+            dir_versions: Mutex::new(HashMap::new()),
         });
         unsafe { msg_send![super(this), initWithVolumeID: volume_id, volumeName: name] }
     }
@@ -698,18 +713,36 @@ impl S3Volume {
         self.ivars().backend.get()
     }
 
-    /// Record that `dir_path`'s contents just changed (a create/remove/rename under
-    /// it). Its reported mtime and enumeration verifier then move, so macOS drops
-    /// its cached listing and re-enumerates instead of showing stale entries.
+    /// A directory's **entry list** changed (a create/remove/rename under it): move
+    /// its POSIX mtime *and* bump its enumeration generation, so both the kernel's
+    /// attribute cache and FSKit's directory-change detection invalidate and macOS
+    /// re-enumerates instead of showing stale entries.
     fn touch_dir(&self, dir_path: &str) {
         if let Ok(mut m) = self.ivars().dir_mtimes.lock() {
             m.insert(dir_path.to_string(), std::time::SystemTime::now());
         }
+        self.bump_dir_version(dir_path);
     }
 
-    /// The mtime to report for a directory: the last time it changed through this
-    /// mount, else the process-stable fallback (so an unchanged directory reports a
-    /// constant, never a per-call "now").
+    /// A **child's contents** changed (a write/truncate of a file in `dir_path`): the
+    /// enumeration's packed size/mtime for that child is now stale, so bump the
+    /// generation to refresh the cached listing — but *not* the POSIX mtime, which a
+    /// file update must leave untouched.
+    fn touch_dir_child(&self, dir_path: &str) {
+        self.bump_dir_version(dir_path);
+    }
+
+    /// Increment `dir_path`'s enumeration generation (saturating).
+    fn bump_dir_version(&self, dir_path: &str) {
+        if let Ok(mut m) = self.ivars().dir_versions.lock() {
+            let v = m.entry(dir_path.to_string()).or_insert(0);
+            *v = v.saturating_add(1);
+        }
+    }
+
+    /// The mtime to report for a directory: the last time its entry list changed
+    /// through this mount, else the process-stable fallback (so an unchanged directory
+    /// reports a constant, never a per-call "now").
     fn dir_mtime(&self, dir_path: &str) -> std::time::SystemTime {
         self.ivars()
             .dir_mtimes
@@ -719,13 +752,16 @@ impl S3Volume {
             .unwrap_or_else(stable_fallback_time)
     }
 
-    /// A directory's enumeration verifier, derived from its change time: it moves
-    /// exactly when the directory does, so FSKit's own change detection invalidates
-    /// alongside the kernel's attribute cache. Unchanged ⇒ constant.
+    /// A directory's enumeration verifier: its generation counter, which moves on any
+    /// change to the enumeration (entry list *or* a child's size/mtime). Echoing the
+    /// input verifier unchanged (as the code first did) told FSKit the directory never
+    /// changed, so it kept serving a cached listing. Unchanged ⇒ constant.
     fn dir_verifier(&self, dir_path: &str) -> FSDirectoryVerifier {
-        self.dir_mtime(dir_path)
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
+        self.ivars()
+            .dir_versions
+            .lock()
+            .ok()
+            .and_then(|m| m.get(dir_path).copied())
             .unwrap_or(0) as FSDirectoryVerifier
     }
 

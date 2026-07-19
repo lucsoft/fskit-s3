@@ -354,15 +354,24 @@ entitlement (needs a **paid** team + the FSKit Module capability on the App ID).
   macOS never sees it change and keeps serving a **cached listing** — a just-deleted
   file lingers, a just-created one is missing (delete "succeeds" but the file is
   "back" on the next `ls`). Backend delete/list are consistent (proven by the live
-  tests); the staleness is entirely macOS-side cache coherence. The volume keeps a
-  per-directory change time (`VolumeIvars.dir_mtimes`, bumped by `touch_dir` on every
-  create/remove/rename) and reports it as the directory's mtime **and** derives the
-  `enumerate` verifier from it (`dir_verifier`) — the input verifier was previously
-  echoed unchanged, telling FSKit the directory never changed. Both signals move only
-  on an actual change, so unchanged directories still report a constant (no spurious
-  re-enumeration, no editor warning). The map only sees changes made *through this
-  mount* — an acceptable limit any cache shares. This mirrors what Apple's passthrough
-  sample gets for free from `fstat` (a real dir mtime that `unlink` advances).
+  tests); the staleness is entirely macOS-side cache coherence. The volume feeds two
+  **decoupled** signals from `VolumeIvars`, because they answer different questions:
+  - `dir_mtimes` — the directory's POSIX **mtime**, bumped by `touch_dir` only on
+    **structural** changes (create/remove/rename, i.e. the entry list). A file
+    *update* must **not** move it (POSIX; and `make`/`rsync` watch it).
+  - `dir_versions` — an enumeration **generation** feeding the `enumerate` verifier
+    (`dir_verifier`), bumped on **any** change to the enumeration: structural **and** a
+    child's packed size/mtime (`touch_dir_child` on write/truncate). The input verifier
+    was previously echoed unchanged, telling FSKit the directory never changed; without
+    the content bump, Finder's bulk-attribute cache (`getattrlistbulk`) would show a
+    stale size after an in-place edit even though shell `stat`/`ls -l` (per-file) is
+    fresh.
+
+  Both move only on a real change, so unchanged directories still report a constant (no
+  spurious re-enumeration, no editor "changed since reading" warning). The maps only see
+  changes made *through this mount* — an acceptable limit any cache shares. A real local
+  FS gets the mtime half for free from `fstat` (`unlink` advances the dir mtime); the
+  verifier half is FSKit-specific.
 - **The volume must implement `maximumFileSizeInBits` (or `maximumFileSize`)**:
   it's `@optional` in `FSVolumePathConfOperations` but required at runtime —
   otherwise `getMaxFileSizeInBits: … One of them must be implemented`.
