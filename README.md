@@ -29,23 +29,37 @@ opens a window that links you to the right settings pane:
 on there.
 
 **3. Mount a bucket.** From the ☁ menu, pick **New Connection…** and fill in the
-form:
-
-- an **in-memory demo** (no credentials, good for a first try), or
-- an **S3 bucket** — endpoint, bucket, region, and your access keys. The secret
-  is saved to your Keychain.
+form — endpoint, bucket, region, and your access keys. The secret is saved to
+your Keychain.
 
 The menu then mounts and unmounts each connection. That's it — the bucket shows
 up as a folder you can open in Finder.
 
-To rebuild and reinstall the app after changes:
+### Mounting from the command line
+
+There's no custom CLI — a connection is just the system `mount` tool. The first
+path is the bucket config (it doesn't need to exist on disk); the second is the
+folder to mount it at.
 
 ```sh
-scripts/dev-app.sh        # build -> install to /Applications -> launch
+# With the secret in your Keychain (recommended). Store it once, keyed by the
+# connection name, then mount without repeating it:
+security add-generic-password -U -s dev.lucsoft.fskit-s3 -a photos -w 's3cr3t'
+mount -F -t fskit-s3 \
+  "/s3/photos?bucket=my-bucket&access_key_id=AKIA…&region=us-east-1" \
+  ~/fskit-s3/photos
+
+# Or pass the secret inline — no setup, but insecure (it's visible to `ps`/`mount`):
+mount -F -t fskit-s3 -o secret=s3cr3t \
+  "/s3/photos?bucket=my-bucket&access_key_id=AKIA…&region=us-east-1" \
+  ~/fskit-s3/photos
+
+# Unmount either of them:
+umount ~/fskit-s3/photos
 ```
 
-Prefer the command line? There's no custom CLI — a connection is just the system
-`mount` tool. See [mounting by hand](CONTRIBUTING.md#mounting-by-hand).
+See [mounting by hand](CONTRIBUTING.md#mounting-by-hand) for how the secret
+travels and the unsigned-dev-build caveat.
 
 ## How it works
 

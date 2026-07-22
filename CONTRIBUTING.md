@@ -73,6 +73,16 @@ reads back and passes via `-o secret`, so one-click and launch mounts stop
 re-prompting. It's insecure (plaintext, and visible in `ps`/`mount` at mount time);
 signed installs should use the Keychain instead.
 
+## Iterating on the app
+
+Build and run the host app straight from Xcode as usual. For a one-command CLI
+build + install + launch (useful when iterating on the extension, which only
+loads from an installed `.app`):
+
+```sh
+scripts/dev-app.sh        # build -> install to /Applications -> launch
+```
+
 ## Build & test (no Xcode needed)
 
 ```sh
