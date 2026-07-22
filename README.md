@@ -58,8 +58,34 @@ mount -F -t fskit-s3 -o secret=s3cr3t \
 umount ~/fskit-s3/photos
 ```
 
-See [mounting by hand](CONTRIBUTING.md#mounting-by-hand) for how the secret
-travels and the unsigned-dev-build caveat.
+<details>
+<summary><strong>All the options you can pass</strong></summary>
+
+The source path is `/s3/<name>?<key>=<value>&…`. `<name>` is a label for the
+connection (it's also the Keychain account the secret is stored under) — use
+letters, numbers, and `. - _` only, no spaces or slashes. The query carries the
+rest of the config; values can't contain `? & = #`.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `bucket` | **yes** | The bucket name. |
+| `access_key_id` | **yes** | Your access key ID. |
+| `region` | no | Bucket region (e.g. `us-east-1`). Leave off for most S3-compatible stores. |
+| `endpoint` | no | Custom endpoint URL for an S3-compatible store (MinIO, Cloudflare R2, RustFS, …). Omit for AWS. |
+| `session_token` | no | Session token, if you're using temporary (STS) credentials. |
+
+The **secret access key** is never part of the path (it would show up in `ps`
+and `mount`). It comes from your Keychain, keyed by `<name>`; if it isn't there,
+pass it as a mount option instead:
+
+| Option | Meaning |
+| --- | --- |
+| `-o secret=<key>` | The secret access key, passed inline. Convenient, but insecure — visible to `ps`/`mount`. Prefer the Keychain. |
+
+For the full story on how the secret travels (including the unsigned-dev-build
+caveat), see [mounting by hand](CONTRIBUTING.md#mounting-by-hand).
+
+</details>
 
 ## How it works
 
